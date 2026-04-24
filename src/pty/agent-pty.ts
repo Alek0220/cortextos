@@ -3,6 +3,7 @@ import { existsSync, readFileSync, readdirSync } from 'fs';
 import { platform } from 'os';
 import type { AgentConfig, CtxEnv } from '../types/index.js';
 import { OutputBuffer } from './output-buffer.js';
+import stripAnsi from 'strip-ansi';
 
 // node-pty types
 interface IPty {
@@ -167,25 +168,46 @@ export class AgentPTY {
       }
     });
 
-    // Claude Code shows a "trust this folder?" prompt on first run in a new directory.
-    // Auto-accept by sending Enter after the prompt appears.
-    // The prompt takes ~3-5s to render; we send Enter at 5s and 8s for reliability.
-    setTimeout(() => {
-      if (this.pty) {
-        const recent = this.outputBuffer.getRecent();
-        if (recent.includes('trust') || recent.includes('Yes')) {
+    // Claude Code can present interactive safety prompts on first run:
+    // - "Trust this folder?" (safe to accept once per dir)
+    // - "Bypass Permissions mode" warning when using --dangerously-skip-permissions
+    //
+    // In headless mode we must NOT press Enter on the bypass warning (default is "No, exit").
+    // Instead, explicitly select "Yes, I accept" (down arrow + Enter).
+    const maybeAcceptPrompts = () => {
+      if (!this.pty) return;
+      const recent = this.outputBuffer.getRecent();
+      const plain = stripAnsi(recent);
+
+      if (plain.includes('Bypass Permissions mode')) {
+        // Inquirer-style list: default selection is "No, exit".
+        // Never press Enter unless "Yes, I accept" is actually selected.
+        if (/❯\s*2\.\s*Yes,\s*I\s*accept/.test(plain)) {
           this.pty.write('\r');
+          return;
         }
+        // If "No, exit" is selected (or we can't tell), move selection down.
+        this.pty.write('\x1b[B');
+        return;
       }
-    }, 5000);
-    setTimeout(() => {
-      if (this.pty) {
-        const recent = this.outputBuffer.getRecent();
-        if (recent.includes('trust') || recent.includes('Yes')) {
-          this.pty.write('\r');
-        }
+
+      // Trust prompt: accept with Enter. Keep the match narrow so we don't
+      // accidentally confirm an unrelated prompt.
+      const lower = plain.toLowerCase();
+      if (lower.includes('trust') && lower.includes('folder')) {
+        this.pty.write('\r');
       }
-    }, 8000);
+    };
+
+    // Prompts take a few seconds to render; retry a couple times for reliability.
+    setTimeout(maybeAcceptPrompts, 3500);
+    setTimeout(maybeAcceptPrompts, 4500);
+    setTimeout(maybeAcceptPrompts, 5500);
+    setTimeout(maybeAcceptPrompts, 6500);
+    setTimeout(maybeAcceptPrompts, 7500);
+    setTimeout(maybeAcceptPrompts, 8500);
+    setTimeout(maybeAcceptPrompts, 9500);
+    setTimeout(maybeAcceptPrompts, 10500);
   }
 
   /**

@@ -945,11 +945,11 @@ busCommand
   .command('send-telegram')
   .description('Send a message to a Telegram chat')
   .argument('<chat-id>', 'Telegram chat ID')
-  .argument('<message>', 'Message text (supports Telegram Markdown unless --plain-text is set)')
+  .argument('[message]', 'Message text (supports Telegram Markdown unless --plain-text is set). Optional: if omitted/empty and no --image/--file is provided, the command is a no-op.')
   .option('--image <path>', 'Send a photo with caption')
   .option('--file <path>', 'Send a document/file with caption (any file type)')
   .option('--plain-text', 'Skip Telegram Markdown parsing entirely. Use this when the message contains unescaped _, *, backtick, or [ that would otherwise trip the Markdown parser. Without this flag, sendMessage still retries once with parse_mode disabled on a parse-entity error — so it is purely an opt-in to save the retry roundtrip.', false)
-  .action(async (chatId: string, message: string, opts: { image?: string; file?: string; plainText?: boolean }) => {
+  .action(async (chatId: string, message: string | undefined, opts: { image?: string; file?: string; plainText?: boolean }) => {
     // Resolve bot token: agent .env first, then process.env
     const env = resolveEnv();
     let botToken = '';
@@ -976,17 +976,24 @@ busCommand
       process.exit(1);
     }
 
+    const trimmed = (message ?? '').trim();
+    const hasAttachment = Boolean(opts.image || opts.file);
+    if (!hasAttachment && !trimmed) {
+      console.warn('Warning: send-telegram called with no message. Skipping.');
+      return;
+    }
+
     const api = new TelegramAPI(botToken);
     try {
       let sentMessageId = 0;
       if (opts.image) {
-        const result = await api.sendPhoto(chatId, opts.image, message);
+        const result = await api.sendPhoto(chatId, opts.image, trimmed || undefined);
         sentMessageId = result?.result?.message_id ?? 0;
       } else if (opts.file) {
-        const result = await api.sendDocument(chatId, opts.file, message);
+        const result = await api.sendDocument(chatId, opts.file, trimmed || undefined);
         sentMessageId = result?.result?.message_id ?? 0;
       } else {
-        const result = await api.sendMessage(chatId, message, undefined, {
+        const result = await api.sendMessage(chatId, trimmed, undefined, {
           parseMode: opts.plainText ? null : 'HTML',
         });
         sentMessageId = result?.result?.message_id ?? 0;
@@ -995,15 +1002,15 @@ busCommand
       // Log outbound and cache last-sent for context injection
       const env = resolveEnv();
       if (env.agentName && env.ctxRoot) {
-        logOutboundMessage(env.ctxRoot, env.agentName, chatId, message, sentMessageId, {
+        logOutboundMessage(env.ctxRoot, env.agentName, chatId, trimmed, sentMessageId, {
           parseMode: opts.plainText ? 'none' : 'html',
         });
-        cacheLastSent(env.ctxRoot, env.agentName, chatId, message);
+        cacheLastSent(env.ctxRoot, env.agentName, chatId, trimmed);
         // Auto-emit activity event so dashboard sees every Telegram send,
         // even from agents that never call log-event directly.
         try {
           const paths = resolvePaths(env.agentName, env.instanceId, env.org);
-          const preview = message.length > 120 ? message.slice(0, 120) + '…' : message;
+          const preview = trimmed.length > 120 ? trimmed.slice(0, 120) + '…' : trimmed;
           logEvent(paths, env.agentName, env.org, 'message', 'telegram_sent', 'info', JSON.stringify({ chat_id: chatId, message_id: sentMessageId, preview }));
         } catch { /* non-fatal */ }
       }

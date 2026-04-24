@@ -34,8 +34,16 @@ interface StatusLineInput {
 }
 
 async function main(): Promise<void> {
+  // Claude Code's status line renderer expects this command to emit a string.
+  // If stdout is empty/undefined, some versions crash while rendering.
+  // Always print something and exit 0 (this hook must never block the agent).
+  let statusText = 'ctx ?';
+
   const agentName = process.env.CTX_AGENT_NAME;
-  if (!agentName) return;
+  if (!agentName) {
+    process.stdout.write(statusText + '\n');
+    return;
+  }
 
   const ctxRoot = process.env.CTX_ROOT || join(homedir(), '.cortextos', 'default');
   const stateDir = join(ctxRoot, 'state', agentName);
@@ -63,7 +71,10 @@ async function main(): Promise<void> {
   } catch { return; }
 
   const cw = data.context_window;
-  if (!cw) return;
+  if (!cw) {
+    process.stdout.write(statusText + '\n');
+    return;
+  }
 
   const payload = JSON.stringify({
     used_percentage: typeof cw.used_percentage === 'number' ? cw.used_percentage : null,
@@ -76,6 +87,12 @@ async function main(): Promise<void> {
 
   mkdirSync(stateDir, { recursive: true });
   atomicWriteSync(outPath, payload);
+
+  if (typeof cw.used_percentage === 'number') {
+    statusText = `ctx ${Math.round(cw.used_percentage)}%`;
+  }
+
+  process.stdout.write(statusText + '\n');
 }
 
 main().catch(() => process.exit(0));
