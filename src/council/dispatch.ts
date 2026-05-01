@@ -17,6 +17,11 @@
 
 import { spawn } from 'child_process';
 import type { CouncilProvider } from '../types/index.js';
+import {
+  resolveAnthropicAuth,
+  type AuthResult,
+  type ResolveAuthOptions,
+} from './anthropic-auth.js';
 
 export interface CouncilMember {
   id: string;
@@ -87,9 +92,19 @@ export async function dispatchCodex(
  * handles raw-JSON-in-stdout via its no-marker fallback path — no codex
  * frame fabrication needed.
  *
+ * Auth: resolveAnthropicAuth() picks between two modes —
+ *   - api-key  → ANTHROPIC_API_KEY env var, sent as `x-api-key`.
+ *   - oauth    → Claude Code Max subscription token from the macOS keychain,
+ *                sent as `Authorization: Bearer` with `anthropic-beta:
+ *                oauth-2025-04-20` and the Claude Code system prompt.
+ * cortextOS NEVER refreshes the OAuth token (single-writer policy — see
+ * anthropic-auth.ts). If the keychain token is expired, we surface an
+ * actionable stderr message instead.
+ *
  * Failure modes:
- *   - Missing ANTHROPIC_API_KEY → exitCode:1, stderr explains.
+ *   - Auth resolution failure → exitCode:1, stderr explains how to fix.
  *   - Non-2xx response → exitCode:1, stderr carries the API error body.
+ *   - 401 in oauth mode → stderr also points at the keep-alive cron.
  *   - Network error / abort → reject (router catches and records as error).
  *
  * The cwd argument is ignored (no rollout files to isolate — the API call
@@ -99,38 +114,74 @@ const OPUS_MODEL_DEFAULT = 'claude-opus-4-7';
 const OPUS_MAX_TOKENS = 4096;
 const ANTHROPIC_MESSAGES_URL = 'https://api.anthropic.com/v1/messages';
 const ANTHROPIC_VERSION = '2023-06-01';
+const ANTHROPIC_OAUTH_BETA = 'oauth-2025-04-20';
+const CLAUDE_CODE_SYSTEM_PROMPT = "You are Claude Code, Anthropic's official CLI for Claude.";
+
+/** Test seam — lets unit tests inject a stub auth resolver. */
+export interface DispatchOpusOptions {
+  resolveAuth?: (opts?: ResolveAuthOptions) => AuthResult;
+}
+
+function authFailureToStderr(failure: Exclude<AuthResult, { ok: true }>): string {
+  switch (failure.reason) {
+    case 'keychain-missing':
+      return `dispatchOpus: ANTHROPIC_API_KEY not set and macOS keychain unavailable: ${failure.detail}`;
+    case 'keychain-empty':
+      return `dispatchOpus: ANTHROPIC_API_KEY not set and Claude Code keychain entry not found. Run \`claude\` to log in, or set ANTHROPIC_API_KEY. (${failure.detail})`;
+    case 'keychain-malformed':
+      return `dispatchOpus: Claude Code keychain entry is malformed: ${failure.detail}. Re-run \`claude\` to repair it.`;
+    case 'oauth-expired':
+      return `dispatchOpus: ${failure.detail}`;
+  }
+}
 
 export async function dispatchOpus(
   member: CouncilMember,
   plan: string,
   _cwd: string,
   signal?: AbortSignal,
+  options: DispatchOpusOptions = {},
 ): Promise<DispatchResult> {
   const start = Date.now();
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
+  const resolve = options.resolveAuth ?? resolveAnthropicAuth;
+  const authResult = resolve();
+  if (!authResult.ok) {
     return {
       stdout: '',
-      stderr: 'dispatchOpus: ANTHROPIC_API_KEY is not set in the environment.',
+      stderr: authFailureToStderr(authResult),
       exitCode: 1,
       latency_ms: Date.now() - start,
     };
   }
+  const auth = authResult.auth;
 
   const model = member.model ?? OPUS_MODEL_DEFAULT;
-  const body = JSON.stringify({
+  const bodyObj: Record<string, unknown> = {
     model,
     max_tokens: OPUS_MAX_TOKENS,
     messages: [{ role: 'user', content: plan }],
-  });
+  };
+  if (auth.mode === 'oauth') {
+    // OAuth surface requires the Claude Code system prompt — without it the
+    // API rejects requests authenticated with a `user:inference`-scoped token.
+    bodyObj.system = CLAUDE_CODE_SYSTEM_PROMPT;
+  }
+  const body = JSON.stringify(bodyObj);
+
+  const headers: Record<string, string> = {
+    'anthropic-version': ANTHROPIC_VERSION,
+    'content-type': 'application/json',
+  };
+  if (auth.mode === 'api-key') {
+    headers['x-api-key'] = auth.token;
+  } else {
+    headers['authorization'] = `Bearer ${auth.token}`;
+    headers['anthropic-beta'] = ANTHROPIC_OAUTH_BETA;
+  }
 
   const response = await fetch(ANTHROPIC_MESSAGES_URL, {
     method: 'POST',
-    headers: {
-      'x-api-key': apiKey,
-      'anthropic-version': ANTHROPIC_VERSION,
-      'content-type': 'application/json',
-    },
+    headers,
     body,
     signal,
   });
@@ -139,9 +190,13 @@ export async function dispatchOpus(
 
   if (!response.ok) {
     const errBody = await response.text().catch(() => '<unreadable>');
+    const hint =
+      auth.mode === 'oauth' && response.status === 401
+        ? '\nHint: OAuth token rejected. Run `claude` to refresh the keychain, or check the keep-alive cron.'
+        : '';
     return {
       stdout: '',
-      stderr: `dispatchOpus: HTTP ${response.status} ${response.statusText}\n${errBody}`,
+      stderr: `dispatchOpus: HTTP ${response.status} ${response.statusText}\n${errBody}${hint}`,
       exitCode: 1,
       latency_ms,
     };

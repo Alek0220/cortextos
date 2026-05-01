@@ -1,11 +1,11 @@
 /**
  * dispatch-opus.test.ts — pin the Anthropic Messages API contract.
  *
- * The dispatcher is a thin fetch wrapper, but it owns three behaviors that
+ * The dispatcher is a thin fetch wrapper, but it owns four behaviors that
  * silently breaking would break the council:
- *   1. Missing API key returns a structured failure (exitCode:1) instead
- *      of throwing, so the router records it as a member-level error
- *      rather than crashing the whole council.
+ *   1. Auth resolution failure (no API key + no keychain) returns a
+ *      structured failure (exitCode:1) instead of throwing, so the router
+ *      records it as a member-level error rather than crashing the council.
  *   2. The request shape (URL, headers, model, messages) matches the
  *      Anthropic Messages API contract. If we silently flip to a stale
  *      version header or the wrong model id, councils still "succeed"
@@ -14,9 +14,13 @@
  *      `stdout` field so the extractor's no-marker fallback can find the
  *      verdict JSON. Stripping or wrapping that text would defeat the
  *      extractor.
+ *   4. OAuth mode (Claude Code Max subscription path) sends the right
+ *      headers — `Authorization: Bearer`, `anthropic-beta: oauth-2025-04-20`,
+ *      and the Claude Code system prompt — without leaking `x-api-key`.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { dispatchOpus, type CouncilMember } from '../../../src/council/dispatch';
+import type { AuthResult } from '../../../src/council/anthropic-auth';
 
 const opusMember: CouncilMember = {
   id: 'opus-a',
@@ -24,6 +28,11 @@ const opusMember: CouncilMember = {
 };
 
 const framedPlan = 'You are an ADVERSARIAL council reviewer.\n... PLAN ...';
+
+const oauthAuth = (token = 'sk-ant-oat01-fake', expiresAt = Date.now() + 3600_000): AuthResult => ({
+  ok: true,
+  auth: { mode: 'oauth', token, expiresAt },
+});
 
 describe('dispatchOpus', () => {
   let originalKey: string | undefined;
@@ -40,14 +49,28 @@ describe('dispatchOpus', () => {
     fetchSpy.mockRestore();
   });
 
-  it('returns exitCode:1 with explanatory stderr when ANTHROPIC_API_KEY is missing', async () => {
-    delete process.env.ANTHROPIC_API_KEY;
-
-    const result = await dispatchOpus(opusMember, framedPlan, '/tmp');
+  it('returns exitCode:1 with explanatory stderr when no auth is configured', async () => {
+    const result = await dispatchOpus(opusMember, framedPlan, '/tmp', undefined, {
+      resolveAuth: () => ({ ok: false, reason: 'keychain-empty', detail: 'no entry' }),
+    });
 
     expect(result.exitCode).toBe(1);
     expect(result.stdout).toBe('');
-    expect(result.stderr).toMatch(/ANTHROPIC_API_KEY/);
+    expect(result.stderr).toMatch(/ANTHROPIC_API_KEY|keychain/i);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('returns exitCode:1 when the OAuth token has expired (no silent refresh)', async () => {
+    const result = await dispatchOpus(opusMember, framedPlan, '/tmp', undefined, {
+      resolveAuth: () => ({
+        ok: false,
+        reason: 'oauth-expired',
+        detail: 'Claude Code OAuth access token has -10s of life left.',
+      }),
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toMatch(/expired|life left/i);
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -159,5 +182,70 @@ describe('dispatchOpus', () => {
 
     expect(result.stdout).toBe('{"verdict":"approve","concerns":[],"must_fix":[]}');
     expect(result.stdout).not.toMatch(/should not appear/);
+  });
+
+  it('OAuth mode: Bearer auth + beta header + Claude Code system prompt; no x-api-key', async () => {
+    delete process.env.ANTHROPIC_API_KEY;
+    fetchSpy.mockResolvedValue(new Response(
+      JSON.stringify({
+        content: [{ type: 'text', text: '{"verdict":"approve","concerns":[],"must_fix":[]}' }],
+      }),
+      { status: 200 },
+    ));
+
+    const result = await dispatchOpus(opusMember, framedPlan, '/tmp', undefined, {
+      resolveAuth: () => oauthAuth('sk-ant-oat01-fake'),
+    });
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://api.anthropic.com/v1/messages');
+    const headers = init.headers as Record<string, string>;
+    expect(headers['authorization']).toBe('Bearer sk-ant-oat01-fake');
+    expect(headers['anthropic-beta']).toBe('oauth-2025-04-20');
+    expect(headers['anthropic-version']).toBe('2023-06-01');
+    expect(headers['x-api-key']).toBeUndefined();
+
+    const body = JSON.parse(init.body as string);
+    expect(body.system).toBe("You are Claude Code, Anthropic's official CLI for Claude.");
+    expect(body.model).toBe('claude-opus-4-7');
+    expect(body.messages).toEqual([{ role: 'user', content: framedPlan }]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe('{"verdict":"approve","concerns":[],"must_fix":[]}');
+  });
+
+  it('OAuth mode: 401 response includes a re-auth hint pointing at `claude` / cron', async () => {
+    delete process.env.ANTHROPIC_API_KEY;
+    fetchSpy.mockResolvedValue(new Response(
+      '{"error":{"type":"authentication_error","message":"invalid bearer token"}}',
+      { status: 401, statusText: 'Unauthorized' },
+    ));
+
+    const result = await dispatchOpus(opusMember, framedPlan, '/tmp', undefined, {
+      resolveAuth: () => oauthAuth('sk-ant-oat01-fake'),
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toMatch(/HTTP 401/);
+    expect(result.stderr).toMatch(/claude/);
+    expect(result.stderr).toMatch(/cron|refresh/i);
+  });
+
+  it('api-key mode: does NOT send the Claude Code system prompt or beta header', async () => {
+    process.env.ANTHROPIC_API_KEY = 'sk-test-key';
+    fetchSpy.mockResolvedValue(new Response(
+      JSON.stringify({ content: [{ type: 'text', text: '{}' }] }),
+      { status: 200 },
+    ));
+
+    await dispatchOpus(opusMember, framedPlan, '/tmp');
+
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    const headers = init.headers as Record<string, string>;
+    expect(headers['authorization']).toBeUndefined();
+    expect(headers['anthropic-beta']).toBeUndefined();
+    const body = JSON.parse(init.body as string);
+    expect(body.system).toBeUndefined();
   });
 });
