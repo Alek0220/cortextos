@@ -1,0 +1,37 @@
+Reading prompt from stdin...
+OpenAI Codex v0.125.0 (research preview)
+--------
+workdir: /private/tmp/codex-spike
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 019de2f1-9aa5-7311-93fe-cccccccccccc
+--------
+user
+Review the plan.
+
+codex
+{
+  "verdict": "approve",
+  "concerns": [
+    "Minor: missing changelog entry"
+  ],
+  "must_fix": [
+    "Add CHANGELOG.md entry before merge"
+  ]
+}
+2026-05-01T09:50:30.000000Z ERROR codex_core::session: failed to record rollout items
+tokens used
+1234
+{
+  "verdict": "approve",
+  "concerns": [
+    "Minor: missing changelog entry"
+  ],
+  "must_fix": [
+    "Add CHANGELOG.md entry before merge"
+  ]
+}

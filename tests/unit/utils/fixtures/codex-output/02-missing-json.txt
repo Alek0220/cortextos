@@ -1,0 +1,22 @@
+Reading prompt from stdin...
+OpenAI Codex v0.125.0 (research preview)
+--------
+workdir: /private/tmp/codex-spike
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 019de2f1-9aa5-7311-93fe-aaaaaaaaaaaa
+--------
+user
+Review this plan and respond with JSON.
+
+Plan: Make app faster.
+
+codex
+I cannot determine a verdict from the information provided. Please supply a complete plan with explicit changes.
+2026-05-01T09:50:00.000000Z ERROR codex_core::session: failed to record rollout items
+tokens used
+542

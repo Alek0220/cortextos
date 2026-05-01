@@ -1,0 +1,19 @@
+Reading prompt from stdin...
+OpenAI Codex v0.125.0 (research preview)
+--------
+workdir: /private/tmp/codex-spike
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 019de2f1-9aa5-7311-93fe-bbbbbbbbbbbb
+--------
+user
+Review this plan.
+
+codex
+{"verdict": "approve", "concerns": [unterminated, "broken"], "must_fix":}
+tokens used
+800

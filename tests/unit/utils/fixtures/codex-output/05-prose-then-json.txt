@@ -1,0 +1,23 @@
+Reading prompt from stdin...
+OpenAI Codex v0.125.0 (research preview)
+--------
+workdir: /private/tmp/codex-spike
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 019de2f1-9aa5-7311-93fe-dddddddddddd
+--------
+user
+Review the plan.
+
+codex
+Here is my verdict in the requested format:
+
+{"verdict":"approve","concerns":[],"must_fix":["Document the rollback procedure"]}
+
+Note that this is a low-risk change overall.
+tokens used
+1100

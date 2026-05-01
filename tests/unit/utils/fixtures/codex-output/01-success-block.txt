@@ -1,0 +1,24 @@
+Reading prompt from stdin...
+OpenAI Codex v0.125.0 (research preview)
+--------
+workdir: /private/tmp/codex-spike
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 019de2f1-9aa5-7311-93fe-75c49c0db3d0
+--------
+user
+You are an adversarial council reviewer. Review this plan and respond with ONLY a JSON object on stdout matching:
+{"verdict": "approve" | "block", "concerns": [string, ...], "must_fix": [string, ...]}
+
+Plan: Add a new endpoint /api/users that returns user list from postgres without authentication.
+
+codex
+{"verdict":"block","concerns":["The endpoint exposes a user list without authentication, creating a direct privacy and data-exfiltration risk.","The plan does not define authorization, data minimization, pagination, rate limiting, audit logging, or abuse protections.","Returning users directly from Postgres may leak sensitive fields if the response schema is not explicitly constrained."],"must_fix":["Require authentication and appropriate authorization before returning any user data.","Define an explicit safe response schema that excludes sensitive fields such as passwords, tokens, emails if not strictly needed, internal IDs, and metadata.","Add pagination, rate limiting, and audit logging for access to the endpoint.","Document the intended consumers and access policy for /api/users before implementation."]}
+2026-05-01T09:49:45.371519Z ERROR codex_core::session: failed to record rollout items: thread 019de2f1-9aa5-7311-93fe-75c49c0db3d0 not found
+tokens used
+21,149
+{"verdict":"block","concerns":["The endpoint exposes a user list without authentication, creating a direct privacy and data-exfiltration risk.","The plan does not define authorization, data minimization, pagination, rate limiting, audit logging, or abuse protections.","Returning users directly from Postgres may leak sensitive fields if the response schema is not explicitly constrained."],"must_fix":["Require authentication and appropriate authorization before returning any user data.","Define an explicit safe response schema that excludes sensitive fields such as passwords, tokens, emails if not strictly needed, internal IDs, and metadata.","Add pagination, rate limiting, and audit logging for access to the endpoint.","Document the intended consumers and access policy for /api/users before implementation."]}
