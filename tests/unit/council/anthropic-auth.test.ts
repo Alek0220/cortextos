@@ -10,7 +10,7 @@
  *      expiresAt} required. Anything else is keychain-malformed.
  *   3. Single-writer policy: the resolver NEVER refreshes. If the token is
  *      within MIN_LIFETIME_MS (30s) of expiry, return `oauth-expired` and
- *      let the operator (or keep-alive cron) handle it.
+ *      let the dispatcher's reactive-refresh path handle it.
  */
 import { describe, it, expect } from 'vitest';
 import { resolveAnthropicAuth } from '../../../src/council/anthropic-auth';
@@ -74,7 +74,7 @@ describe('resolveAnthropicAuth', () => {
     if (!result.ok) {
       expect(result.reason).toBe('oauth-expired');
       expect(result.detail).toMatch(/cortextOS does not refresh/);
-      expect(result.detail).toMatch(/keep-alive cron|claude/);
+      expect(result.detail).toMatch(/claude -p|claude/);
     }
   });
 

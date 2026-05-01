@@ -97,14 +97,31 @@ export async function dispatchCodex(
  *   - oauth    → Claude Code Max subscription token from the macOS keychain,
  *                sent as `Authorization: Bearer` with `anthropic-beta:
  *                oauth-2025-04-20` and the Claude Code system prompt.
- * cortextOS NEVER refreshes the OAuth token (single-writer policy — see
- * anthropic-auth.ts). If the keychain token is expired, we surface an
- * actionable stderr message instead.
+ *
+ * Single-writer refresh policy:
+ *   cortextOS does NOT refresh the OAuth token in-process — the OAuth
+ *   provider rotates refresh_token on every refresh, so two processes
+ *   refreshing in parallel would invalidate each other (single-writer
+ *   policy, see anthropic-auth.ts).
+ *
+ *   What we DO is reactively spawn `claude -p "ping"` when we observe an
+ *   expired token (resolver returns oauth-expired) or an authentication
+ *   failure from the API (HTTP 401). The Claude Code SDK is then the
+ *   actual refresher — we just trigger it by making it run a request.
+ *   After the spawn completes, we re-read the keychain and retry exactly
+ *   once. The retry guard means we never loop on a bad token.
+ *
+ *   Why reactive instead of a cron: empirically `claude --version` and
+ *   `claude -p "ping"` only refresh when the SDK's own pre-expiry buffer
+ *   triggers — calling them well before expiry is a no-op. The reactive
+ *   path runs them at the moment they're guaranteed to refresh: when the
+ *   token is actually within the SDK's buffer or has been rejected.
  *
  * Failure modes:
- *   - Auth resolution failure → exitCode:1, stderr explains how to fix.
+ *   - Auth resolution failure (non-recoverable) → exitCode:1, stderr explains.
  *   - Non-2xx response → exitCode:1, stderr carries the API error body.
- *   - 401 in oauth mode → stderr also points at the keep-alive cron.
+ *   - 401 after one refresh+retry → exitCode:1 with re-auth hint.
+ *   - Refresh subprocess fails → exitCode:1 with the spawn error.
  *   - Network error / abort → reject (router catches and records as error).
  *
  * The cwd argument is ignored (no rollout files to isolate — the API call
@@ -116,10 +133,79 @@ const ANTHROPIC_MESSAGES_URL = 'https://api.anthropic.com/v1/messages';
 const ANTHROPIC_VERSION = '2023-06-01';
 const ANTHROPIC_OAUTH_BETA = 'oauth-2025-04-20';
 const CLAUDE_CODE_SYSTEM_PROMPT = "You are Claude Code, Anthropic's official CLI for Claude.";
+/** Refresh subprocess timeout. Claude Code SDK refreshes well under this. */
+const REFRESH_TIMEOUT_MS = 30_000;
 
-/** Test seam — lets unit tests inject a stub auth resolver. */
+/**
+ * Reactively trigger a Claude Code SDK token refresh by running `claude -p`.
+ *
+ * Exposed for tests so they can stub the spawn without poking the real CLI.
+ * In production, runs `claude -p "ping"` and discards its output — we only
+ * care about the side-effect on the keychain (the SDK refreshes its access
+ * token before making its own API call when the existing one is within its
+ * pre-expiry buffer).
+ *
+ * Resolves on exit code 0; rejects on non-zero exit, spawn error, or timeout.
+ */
+export async function refreshClaudeCodeOAuth(timeoutMs: number = REFRESH_TIMEOUT_MS): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('claude', ['-p', 'ping'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM');
+      reject(new Error(`claude -p ping timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    child.stdout.on('data', () => { /* drain */ });
+    child.stderr.on('data', () => { /* drain */ });
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve();
+      else reject(new Error(`claude -p ping exited with code ${code}`));
+    });
+  });
+}
+
+/**
+ * Process-wide refresh deduplication.
+ *
+ * The council fires N members in parallel. If the token is expired, ALL N
+ * dispatchOpus calls observe oauth-expired (or 401) and would each spawn
+ * `claude -p ping` — exactly the concurrent-refresh race the single-writer
+ * policy was meant to prevent. The OAuth provider rotates refresh_token on
+ * every refresh, so two simultaneous refreshes invalidate each other.
+ *
+ * Solution: at most one `claude -p` runs per process. The first caller
+ * starts the refresh, all concurrent callers await the same promise. After
+ * it settles (success or failure), the slot clears and the NEXT
+ * oauth-expired observation can trigger a fresh attempt.
+ *
+ * `_resetInflightRefresh` is a test-only escape hatch — the singleton state
+ * is module-scoped and needs clearing between tests to avoid order-dependent
+ * leakage.
+ */
+let inflightRefresh: Promise<void> | null = null;
+
+async function dedupedRefresh(refreshFn: () => Promise<void>): Promise<void> {
+  if (!inflightRefresh) {
+    inflightRefresh = refreshFn().finally(() => {
+      inflightRefresh = null;
+    });
+  }
+  return inflightRefresh;
+}
+
+/** Test-only: clear the module-level inflight refresh slot. */
+export function _resetInflightRefresh(): void {
+  inflightRefresh = null;
+}
+
+/** Test seam — lets unit tests inject stub resolver and refresh. */
 export interface DispatchOpusOptions {
   resolveAuth?: (opts?: ResolveAuthOptions) => AuthResult;
+  refresh?: () => Promise<void>;
 }
 
 function authFailureToStderr(failure: Exclude<AuthResult, { ok: true }>): string {
@@ -143,77 +229,117 @@ export async function dispatchOpus(
   options: DispatchOpusOptions = {},
 ): Promise<DispatchResult> {
   const start = Date.now();
-  const resolve = options.resolveAuth ?? resolveAnthropicAuth;
-  const authResult = resolve();
-  if (!authResult.ok) {
+  const resolveFn = options.resolveAuth ?? resolveAnthropicAuth;
+  const refreshFn = options.refresh ?? refreshClaudeCodeOAuth;
+
+  // Single-shot retry guard: refresh+retry happens at most once per dispatch
+  // call. The two recoverable conditions are (a) resolver returns oauth-expired
+  // BEFORE we make the API call, and (b) API returns 401 in oauth mode AFTER
+  // we make the call. Either one triggers `claude -p ping` (which causes the
+  // Claude Code SDK to refresh the keychain), then we re-resolve and try once
+  // more. After that, we surface the failure.
+  let didRefresh = false;
+
+  while (true) {
+    const authResult = resolveFn();
+
+    if (!authResult.ok) {
+      if (authResult.reason === 'oauth-expired' && !didRefresh) {
+        didRefresh = true;
+        try {
+          await dedupedRefresh(refreshFn);
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err);
+          return {
+            stdout: '',
+            stderr: `dispatchOpus: OAuth token expired and \`claude -p\` refresh failed: ${detail}`,
+            exitCode: 1,
+            latency_ms: Date.now() - start,
+          };
+        }
+        continue;
+      }
+      return {
+        stdout: '',
+        stderr: authFailureToStderr(authResult),
+        exitCode: 1,
+        latency_ms: Date.now() - start,
+      };
+    }
+
+    const auth = authResult.auth;
+
+    const model = member.model ?? OPUS_MODEL_DEFAULT;
+    const bodyObj: Record<string, unknown> = {
+      model,
+      max_tokens: OPUS_MAX_TOKENS,
+      messages: [{ role: 'user', content: plan }],
+    };
+    if (auth.mode === 'oauth') {
+      // OAuth surface requires the Claude Code system prompt — without it the
+      // API rejects requests authenticated with a `user:inference`-scoped token.
+      bodyObj.system = CLAUDE_CODE_SYSTEM_PROMPT;
+    }
+    const body = JSON.stringify(bodyObj);
+
+    const headers: Record<string, string> = {
+      'anthropic-version': ANTHROPIC_VERSION,
+      'content-type': 'application/json',
+    };
+    if (auth.mode === 'api-key') {
+      headers['x-api-key'] = auth.token;
+    } else {
+      headers['authorization'] = `Bearer ${auth.token}`;
+      headers['anthropic-beta'] = ANTHROPIC_OAUTH_BETA;
+    }
+
+    const response = await fetch(ANTHROPIC_MESSAGES_URL, {
+      method: 'POST',
+      headers,
+      body,
+      signal,
+    });
+
+    if (!response.ok) {
+      // 401 in oauth mode is recoverable once: keychain may have stale token
+      // even though resolver thought it was fresh (clock skew, server-side
+      // revocation, etc.). Trigger a refresh and retry exactly once.
+      if (response.status === 401 && auth.mode === 'oauth' && !didRefresh) {
+        didRefresh = true;
+        try {
+          await dedupedRefresh(refreshFn);
+          continue;
+        } catch {
+          // Fall through to the error response below — the original 401 is
+          // more actionable than the spawn error.
+        }
+      }
+      const errBody = await response.text().catch(() => '<unreadable>');
+      const hint =
+        auth.mode === 'oauth' && response.status === 401
+          ? '\nHint: OAuth token rejected even after `claude -p` refresh attempt. Run `claude` interactively to re-authenticate.'
+          : '';
+      return {
+        stdout: '',
+        stderr: `dispatchOpus: HTTP ${response.status} ${response.statusText}\n${errBody}${hint}`,
+        exitCode: 1,
+        latency_ms: Date.now() - start,
+      };
+    }
+
+    const json = (await response.json()) as { content?: Array<{ type: string; text?: string }> };
+    const text = (json.content ?? [])
+      .filter((b) => b.type === 'text' && typeof b.text === 'string')
+      .map((b) => b.text as string)
+      .join('');
+
     return {
-      stdout: '',
-      stderr: authFailureToStderr(authResult),
-      exitCode: 1,
+      stdout: text,
+      stderr: '',
+      exitCode: 0,
       latency_ms: Date.now() - start,
     };
   }
-  const auth = authResult.auth;
-
-  const model = member.model ?? OPUS_MODEL_DEFAULT;
-  const bodyObj: Record<string, unknown> = {
-    model,
-    max_tokens: OPUS_MAX_TOKENS,
-    messages: [{ role: 'user', content: plan }],
-  };
-  if (auth.mode === 'oauth') {
-    // OAuth surface requires the Claude Code system prompt — without it the
-    // API rejects requests authenticated with a `user:inference`-scoped token.
-    bodyObj.system = CLAUDE_CODE_SYSTEM_PROMPT;
-  }
-  const body = JSON.stringify(bodyObj);
-
-  const headers: Record<string, string> = {
-    'anthropic-version': ANTHROPIC_VERSION,
-    'content-type': 'application/json',
-  };
-  if (auth.mode === 'api-key') {
-    headers['x-api-key'] = auth.token;
-  } else {
-    headers['authorization'] = `Bearer ${auth.token}`;
-    headers['anthropic-beta'] = ANTHROPIC_OAUTH_BETA;
-  }
-
-  const response = await fetch(ANTHROPIC_MESSAGES_URL, {
-    method: 'POST',
-    headers,
-    body,
-    signal,
-  });
-
-  const latency_ms = Date.now() - start;
-
-  if (!response.ok) {
-    const errBody = await response.text().catch(() => '<unreadable>');
-    const hint =
-      auth.mode === 'oauth' && response.status === 401
-        ? '\nHint: OAuth token rejected. Run `claude` to refresh the keychain, or check the keep-alive cron.'
-        : '';
-    return {
-      stdout: '',
-      stderr: `dispatchOpus: HTTP ${response.status} ${response.statusText}\n${errBody}${hint}`,
-      exitCode: 1,
-      latency_ms,
-    };
-  }
-
-  const json = (await response.json()) as { content?: Array<{ type: string; text?: string }> };
-  const text = (json.content ?? [])
-    .filter((b) => b.type === 'text' && typeof b.text === 'string')
-    .map((b) => b.text as string)
-    .join('');
-
-  return {
-    stdout: text,
-    stderr: '',
-    exitCode: 0,
-    latency_ms,
-  };
 }
 
 /**

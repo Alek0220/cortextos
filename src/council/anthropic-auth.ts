@@ -18,13 +18,13 @@
  *   This module NEVER refreshes the OAuth token. The OAuth provider rotates
  *   refresh_token on every refresh, so two processes refreshing in parallel
  *   would invalidate each other's cached token and log the user out of
- *   Claude Code. To avoid that, only Claude Code itself refreshes — we
- *   piggyback on a keep-alive cron that runs `claude --version` every ~6h
- *   (token life is 8h, so 6h has buffer).
+ *   Claude Code. To avoid that, only Claude Code itself refreshes.
  *
  *   If the keychain token is expired (or within MIN_LIFETIME_MS of expiry),
- *   we return a structured error and let the dispatcher surface it to the
- *   operator. We do NOT silently refresh.
+ *   we return a structured oauth-expired result and let the dispatcher
+ *   handle it. The dispatcher's reactive-refresh path then spawns
+ *   `claude -p ping` to TRIGGER a Claude Code SDK refresh (Claude Code
+ *   stays the sole writer; we just kick it). See dispatch.ts.
  *
  * Failure modes returned via {ok:false}:
  *   - keychain-missing: `security` command not found / not on macOS
@@ -142,7 +142,7 @@ export function resolveAnthropicAuth(opts: ResolveAuthOptions = {}): AuthResult 
       detail:
         `Claude Code OAuth access token has ${Math.floor(remaining / 1000)}s of life left ` +
         `(below ${MIN_LIFETIME_MS / 1000}s buffer). cortextOS does not refresh tokens — ` +
-        `re-run \`claude\` to refresh the keychain, or wait for the keep-alive cron.`,
+        `the dispatcher will trigger a refresh via \`claude -p\` and retry once.`,
     };
   }
 
