@@ -273,6 +273,92 @@ describe('Sprint 1: Template Completeness', () => {
       expect(orchTW).toContain('Challenge Assumptions');
       expect(orchTW).not.toContain('Deep System Scan');
     });
+
+    // S1.7.4 + S1.7.5 council coexistence contract.
+    // hook-council-gate (Bash matcher) and hook-permission-telegram (catch-all)
+    // both fire on every PermissionRequest. They coordinate via the env var
+    // CTX_COUNCIL_GATE_TOOLS — telegram defers (process.exit(0)) for any tool
+    // listed there. If any of these invariants regress the analyst silently
+    // gets dual prompts and a race for the first decision to win.
+    describe('council/telegram coexistence (S1.7.4 + S1.7.5)', () => {
+      const settings = JSON.parse(
+        readFileSync(join(analystDir, '.claude', 'settings.json'), 'utf-8'),
+      );
+
+      it('settings.json env block sets CTX_COUNCIL_GATE_TOOLS to Bash', () => {
+        expect(settings.env).toBeDefined();
+        expect(settings.env.CTX_COUNCIL_GATE_TOOLS).toBe('Bash');
+      });
+
+      it('PermissionRequest has a Bash matcher wired to hook-council-gate', () => {
+        const reqs = settings.hooks?.PermissionRequest as Array<{
+          matcher?: string;
+          hooks: Array<{ command: string; timeout?: number }>;
+        }>;
+        expect(Array.isArray(reqs)).toBe(true);
+        const bashEntry = reqs.find((e) => e.matcher === 'Bash');
+        expect(bashEntry, 'no Bash matcher on PermissionRequest').toBeDefined();
+        const cmds = bashEntry!.hooks.map((h) => h.command);
+        expect(cmds).toContain('cortextos bus hook-council-gate');
+      });
+
+      it('Bash matcher timeout > 5 min so the council can finish', () => {
+        const reqs = settings.hooks.PermissionRequest as Array<{
+          matcher?: string;
+          hooks: Array<{ command: string; timeout?: number }>;
+        }>;
+        const bashEntry = reqs.find((e) => e.matcher === 'Bash')!;
+        const councilHook = bashEntry.hooks.find(
+          (h) => h.command === 'cortextos bus hook-council-gate',
+        )!;
+        // COUNCIL_TIMEOUT_MS in hook-council-gate.ts is 5 * 60 * 1000.
+        // Hook timeout is in seconds and must exceed that or claude kills it
+        // before the council settles.
+        expect(councilHook.timeout).toBeGreaterThan(300);
+      });
+
+      it('catch-all (no matcher) is wired to hook-permission-telegram', () => {
+        const reqs = settings.hooks.PermissionRequest as Array<{
+          matcher?: string;
+          hooks: Array<{ command: string }>;
+        }>;
+        const catchAll = reqs.find((e) => !e.matcher);
+        expect(catchAll, 'no catch-all PermissionRequest entry').toBeDefined();
+        const cmds = catchAll!.hooks.map((h) => h.command);
+        expect(cmds).toContain('cortextos bus hook-permission-telegram');
+      });
+
+      it('Bash matcher comes before catch-all in declaration order', () => {
+        // Claude Code matches by first-match in array order; if catch-all
+        // were first the council would never see Bash calls.
+        const reqs = settings.hooks.PermissionRequest as Array<{
+          matcher?: string;
+        }>;
+        const bashIdx = reqs.findIndex((e) => e.matcher === 'Bash');
+        const catchAllIdx = reqs.findIndex((e) => !e.matcher);
+        expect(bashIdx).toBeGreaterThanOrEqual(0);
+        expect(catchAllIdx).toBeGreaterThanOrEqual(0);
+        expect(bashIdx).toBeLessThan(catchAllIdx);
+      });
+
+      it('every tool listed in CTX_COUNCIL_GATE_TOOLS has a matching hook entry', () => {
+        // The env var is a coordination signal; any tool listed must also be
+        // wired to council-gate, otherwise telegram defers and nothing gates.
+        const gated = (settings.env.CTX_COUNCIL_GATE_TOOLS as string)
+          .split(',').map((s) => s.trim()).filter(Boolean);
+        const reqs = settings.hooks.PermissionRequest as Array<{
+          matcher?: string;
+          hooks: Array<{ command: string }>;
+        }>;
+        for (const tool of gated) {
+          const entry = reqs.find((e) => e.matcher === tool);
+          expect(entry, `gated tool "${tool}" has no PermissionRequest matcher`).toBeDefined();
+          const cmds = entry!.hooks.map((h) => h.command);
+          expect(cmds, `gated tool "${tool}" matcher is not wired to council-gate`)
+            .toContain('cortextos bus hook-council-gate');
+        }
+      });
+    });
   });
 
   describe('Org template', () => {
