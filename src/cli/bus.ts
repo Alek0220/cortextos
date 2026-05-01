@@ -1821,6 +1821,11 @@ busCommand
   .description('Stop hook: writes last_idle.flag timestamp so fast-checker knows agent finished its turn')
   .action(() => runHook('hook-idle-flag'));
 
+busCommand
+  .command('hook-council-gate')
+  .description('PermissionRequest hook: route gated tools through an adversarial council for approve/deny')
+  .action(() => runHook('hook-council-gate'));
+
 // --- OAuth token rotation commands ---
 
 busCommand
