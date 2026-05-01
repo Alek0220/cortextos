@@ -25,8 +25,12 @@
  * Wire-up: register on PermissionRequest in .claude/settings.json with
  *   "command": "cortextos bus hook-council-gate"
  *   "timeout": 360       // > 5min so the hook can finish before claude kills it
- * The hook is intentionally NOT on by default in templates — it has to
- * be opted into per-agent via env.
+ *
+ * The analyst template wires this hook on the `Bash` matcher by default and
+ * sets CTX_COUNCIL_GATE_TOOLS=Bash via the settings.json env block, so any
+ * Bash PermissionRequest on an analyst agent goes through the council
+ * (telegram still owns Edit/Write/etc.). Other templates remain opt-in:
+ * register the hook and set CTX_COUNCIL_GATE_TOOLS to activate.
  */
 
 import { join } from 'path';

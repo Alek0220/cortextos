@@ -15,6 +15,8 @@ All cortextOS commands: `cortextos bus <command>`. Full docs in skill files — 
 | `CTX_TELEGRAM_CHAT_ID` | agent .env | Your Telegram chat ID |
 | `ANTHROPIC_API_KEY` | shell profile | Never stored in a file |
 | `CLAUDE_CODE_OAUTH_TOKEN` | agent .env | Bearer token for this session |
+| `CTX_COUNCIL_GATE_TOOLS` | settings.json `env` | CSV of tool names gated by adversarial council. Analyst default: `Bash`. Empty/unset = pass-through allow. |
+| `CTX_COUNCIL_MEMBERS` | optional override | JSON array of `CouncilMember`. Default roster: `codex-high` + `codex-low`. Add `{"id":"opus-a","provider":"opus"}` to mix Opus into the council (costs an Anthropic API call per gated tool). |
 
 Shared secrets (all agents): `orgs/{org}/secrets.env`
 Agent secrets: `orgs/{org}/agents/{agent}/.env`

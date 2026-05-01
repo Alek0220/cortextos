@@ -15,6 +15,9 @@
     "refreshInterval": 5,
     "timeout": 2
   },
+  "env": {
+    "CTX_COUNCIL_GATE_TOOLS": "Bash"
+  },
   "hooks": {
     "PermissionRequest": [
       {
@@ -24,6 +27,16 @@
             "type": "command",
             "command": "cortextos bus hook-planmode-telegram",
             "timeout": 1860
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cortextos bus hook-council-gate",
+            "timeout": 360
           }
         ]
       },
