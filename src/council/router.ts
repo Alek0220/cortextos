@@ -37,6 +37,7 @@ import { extractCouncilVerdict } from '../utils/codex-output.js';
 import { blindLabel } from './anonymize.js';
 import { mergeVerdicts } from './merge.js';
 import { defaultDispatcher, type CouncilMember, type Dispatcher } from './dispatch.js';
+import { frameCouncilPrompt } from './prompt.js';
 import type {
   BusPaths,
   CouncilKind,
@@ -77,11 +78,15 @@ export async function runCouncil(opts: RouterOptions): Promise<RouterResult> {
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), timeoutMs);
 
+  // Wrap the raw plan in council-protocol framing (kind-specific JSON contract).
+  // The persisted request keeps the original plan; only the model sees the framed text.
+  const framedPlan = frameCouncilPrompt(opts.kind, opts.plan);
+
   try {
     const memberPromises = opts.members.map(async (member): Promise<CouncilMemberResult> => {
       const start = Date.now();
       try {
-        const dispatched = await dispatch(member, opts.plan, cwd, ac.signal);
+        const dispatched = await dispatch(member, framedPlan, cwd, ac.signal);
         // Persist raw outputs for forensics (advisor #7 — capture both streams).
         try {
           writeFileSync(join(cwd, `stdout-${member.id}.txt`), dispatched.stdout, 'utf-8');
