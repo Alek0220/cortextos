@@ -135,6 +135,8 @@ const ANTHROPIC_OAUTH_BETA = 'oauth-2025-04-20';
 const CLAUDE_CODE_SYSTEM_PROMPT = "You are Claude Code, Anthropic's official CLI for Claude.";
 /** Refresh subprocess timeout. Claude Code SDK refreshes well under this. */
 const REFRESH_TIMEOUT_MS = 30_000;
+/** After SIGTERM on timeout, give the child this long to exit before SIGKILL. */
+const REFRESH_KILL_GRACE_MS = 5_000;
 
 /**
  * Reactively trigger a Claude Code SDK token refresh by running `claude -p`.
@@ -145,24 +147,39 @@ const REFRESH_TIMEOUT_MS = 30_000;
  * token before making its own API call when the existing one is within its
  * pre-expiry buffer).
  *
- * Resolves on exit code 0; rejects on non-zero exit, spawn error, or timeout.
+ * The promise settles ONLY on `'close'` (or spawn `'error'`). Even on timeout,
+ * we send SIGTERM, schedule SIGKILL after a grace period, and wait for
+ * `'close'` before rejecting. This is critical: `dedupedRefresh` clears the
+ * inflight slot in `.finally()`, so settling on the timeout deadline (while
+ * the child is still alive) would let a subsequent caller spawn a second
+ * `claude -p` concurrently with the first — exactly the single-writer
+ * violation the deduplication exists to prevent.
  */
-export async function refreshClaudeCodeOAuth(timeoutMs: number = REFRESH_TIMEOUT_MS): Promise<void> {
+export async function refreshClaudeCodeOAuth(
+  timeoutMs: number = REFRESH_TIMEOUT_MS,
+  killGraceMs: number = REFRESH_KILL_GRACE_MS,
+): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn('claude', ['-p', 'ping'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let timedOut = false;
+    let killTimer: NodeJS.Timeout | undefined;
     const timer = setTimeout(() => {
+      timedOut = true;
       child.kill('SIGTERM');
-      reject(new Error(`claude -p ping timed out after ${timeoutMs}ms`));
+      killTimer = setTimeout(() => child.kill('SIGKILL'), killGraceMs);
     }, timeoutMs);
     child.stdout.on('data', () => { /* drain */ });
     child.stderr.on('data', () => { /* drain */ });
     child.on('error', (err) => {
       clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
       reject(err);
     });
     child.on('close', (code) => {
       clearTimeout(timer);
-      if (code === 0) resolve();
+      if (killTimer) clearTimeout(killTimer);
+      if (timedOut) reject(new Error(`claude -p ping timed out after ${timeoutMs}ms`));
+      else if (code === 0) resolve();
       else reject(new Error(`claude -p ping exited with code ${code}`));
     });
   });
@@ -259,6 +276,21 @@ export async function dispatchOpus(
         }
         continue;
       }
+      // No-op refresh: subprocess exited cleanly but the keychain still shows
+      // an expired token. Either Claude Code's pre-expiry buffer is wider than
+      // ours, or `claude -p ping` did not actually refresh (auth dropped,
+      // network failure inside the SDK, etc.). Distinguish this from "token
+      // never refreshed at all" so the operator knows the subprocess ran.
+      if (authResult.reason === 'oauth-expired' && didRefresh) {
+        return {
+          stdout: '',
+          stderr:
+            `dispatchOpus: \`claude -p\` refresh ran but keychain still shows an expired token. ` +
+            `Run \`claude\` interactively to re-authenticate. (${authResult.detail})`,
+          exitCode: 1,
+          latency_ms: Date.now() - start,
+        };
+      }
       return {
         stdout: '',
         stderr: authFailureToStderr(authResult),
@@ -309,9 +341,19 @@ export async function dispatchOpus(
         try {
           await dedupedRefresh(refreshFn);
           continue;
-        } catch {
-          // Fall through to the error response below — the original 401 is
-          // more actionable than the spawn error.
+        } catch (err) {
+          // Surface the refresh failure symmetrically with the oauth-expired
+          // path. The original 401 is recoverable in principle, but if the
+          // refresh subprocess itself failed (timeout, missing `claude`,
+          // non-zero exit) the operator needs to see THAT cause — silently
+          // returning "HTTP 401" hides the actionable failure.
+          const detail = err instanceof Error ? err.message : String(err);
+          return {
+            stdout: '',
+            stderr: `dispatchOpus: HTTP 401 from Anthropic API and \`claude -p\` refresh failed: ${detail}`,
+            exitCode: 1,
+            latency_ms: Date.now() - start,
+          };
         }
       }
       const errBody = await response.text().catch(() => '<unreadable>');

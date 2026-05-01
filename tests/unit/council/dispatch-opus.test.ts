@@ -82,7 +82,11 @@ describe('dispatchOpus', () => {
     expect(refreshCalls).toBe(1);
     expect(resolveCalls).toBe(2);
     expect(result.exitCode).toBe(1);
-    expect(result.stderr).toMatch(/expired|life left/i);
+    // Distinct no-op-refresh message: the subprocess ran but keychain
+    // still shows expired. Operator-actionable wording differs from the
+    // first-attempt expired message.
+    expect(result.stderr).toMatch(/refresh ran but keychain still shows/i);
+    expect(result.stderr).toMatch(/claude/);
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -301,6 +305,33 @@ describe('dispatchOpus', () => {
     expect(result.stderr).toMatch(/HTTP 401/);
     expect(result.stderr).toMatch(/claude/);
     expect(result.stderr).toMatch(/refresh/i);
+  });
+
+  it('OAuth mode 401: if `claude -p` refresh subprocess fails, surface the spawn error (not the 401)', async () => {
+    // Symmetric with the oauth-expired path: when the refresh tool itself
+    // fails (timeout, missing `claude`, non-zero exit), the operator must
+    // see THAT cause — silently returning the 401 hides the real problem.
+    delete process.env.ANTHROPIC_API_KEY;
+    let refreshCalls = 0;
+    fetchSpy.mockResolvedValue(new Response(
+      '{"error":{"type":"authentication_error","message":"invalid bearer token"}}',
+      { status: 401, statusText: 'Unauthorized' },
+    ));
+
+    const result = await dispatchOpus(opusMember, framedPlan, '/tmp', undefined, {
+      resolveAuth: () => oauthAuth('sk-ant-oat01-fake'),
+      refresh: async () => {
+        refreshCalls++;
+        throw new Error('claude -p ping timed out after 30000ms');
+      },
+    });
+
+    expect(refreshCalls).toBe(1);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toMatch(/refresh failed/i);
+    expect(result.stderr).toMatch(/timed out/);
+    expect(result.stderr).toMatch(/HTTP 401/);
   });
 
   it('OAuth mode 401: refresh recovers — second fetch with fresh token succeeds', async () => {
