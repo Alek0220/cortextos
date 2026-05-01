@@ -136,6 +136,58 @@ export interface Approval {
   resolved_by: string | null;
 }
 
+// Council Types — adversarial / advisory plan review (S1+)
+//
+// Councils are the multi-model gate that sits BEFORE PAUL audit on the
+// /idea pipeline. An adversarial council = 2 members (Opus 4.7 + codex
+// gpt-5.5 high reasoning) producing a structured approve/block verdict.
+// An advisory council = 3-8 personas + a synthesis pass — out of scope
+// for S1 but the type shape accommodates both.
+
+export type CouncilKind = 'adversarial' | 'advisory';
+
+export type CouncilStatus =
+  | 'pending'   // created, not yet dispatched
+  | 'running'   // members are executing
+  | 'approved'  // merged verdict = approve
+  | 'blocked'   // merged verdict = block
+  | 'failed'    // every member errored or returned null verdict
+  | 'timeout';  // wall-clock budget exceeded before quorum
+
+export type CouncilProvider = 'opus' | 'codex';
+
+export interface CouncilVerdictJson {
+  verdict: 'approve' | 'block';
+  concerns: string[];
+  must_fix: string[];
+}
+
+export interface CouncilMemberResult {
+  member_id: string;
+  provider: CouncilProvider;
+  /** null = the member ran but produced no parseable verdict (default-deny). */
+  verdict: CouncilVerdictJson | null;
+  latency_ms: number;
+  /** Populated only when the spawn or parse failed; orthogonal to verdict=null. */
+  error?: string;
+}
+
+export interface CouncilRequest {
+  id: string;
+  kind: CouncilKind;
+  org: string;
+  requesting_agent: string;
+  /** The plan text submitted for review. */
+  plan: string;
+  status: CouncilStatus;
+  created_at: string; // ISO 8601
+  updated_at: string; // ISO 8601
+  resolved_at: string | null;
+  results: CouncilMemberResult[];
+  /** Merged verdict after all members complete; null until quorum. */
+  merged: CouncilVerdictJson | null;
+}
+
 // Agent Config Types (config.json)
 
 export interface EcosystemFeatureConfig {
