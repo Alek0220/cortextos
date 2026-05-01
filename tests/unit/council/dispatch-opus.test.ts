@@ -18,7 +18,8 @@
  *      tokens itself — Claude Code is the sole writer; we just trigger it.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { dispatchOpus, _resetInflightRefresh, type CouncilMember } from '../../../src/council/dispatch';
+import { EventEmitter } from 'events';
+import { dispatchOpus, refreshClaudeCodeOAuth, _resetInflightRefresh, type CouncilMember } from '../../../src/council/dispatch';
 import type { AuthResult } from '../../../src/council/anthropic-auth';
 
 const opusMember: CouncilMember = {
@@ -476,5 +477,122 @@ describe('dispatchOpus', () => {
     expect(headers['anthropic-beta']).toBeUndefined();
     const body = JSON.parse(init.body as string);
     expect(body.system).toBeUndefined();
+  });
+});
+
+/**
+ * refreshClaudeCodeOAuth — three-tier deadline contract.
+ *
+ * The function MUST settle in bounded time even if the spawned `claude` child
+ * ignores SIGTERM and SIGKILL. Settling is what releases the inflight slot in
+ * dedupedRefresh — a hung refresh would leak the singleton and stall every
+ * future refresh caller forever. The backstop is the last line of defense.
+ */
+describe('refreshClaudeCodeOAuth (subprocess deadline)', () => {
+  /** Stub ChildProcess that emits nothing — simulates a child ignoring all signals. */
+  function makeZombieChild(): EventEmitter & {
+    stdout: EventEmitter;
+    stderr: EventEmitter;
+    kill: ReturnType<typeof vi.fn>;
+  } {
+    const child = new EventEmitter() as EventEmitter & {
+      stdout: EventEmitter;
+      stderr: EventEmitter;
+      kill: ReturnType<typeof vi.fn>;
+    };
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = vi.fn();
+    return child;
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('backstop rejects when child never exits after SIGKILL (prevents singleton leak)', async () => {
+    const child = makeZombieChild();
+    const spawnFn = vi.fn(() => child as unknown as ReturnType<typeof import('child_process').spawn>);
+
+    // Tight deadlines: 100ms timeout, 50ms kill grace, 25ms backstop.
+    // Total bounded settle: 175ms even with a zombie child.
+    const promise = refreshClaudeCodeOAuth(100, 50, 25, spawnFn as never);
+    // Surface rejection without throwing in the test thread.
+    let outcome: { ok: true } | { ok: false; err: Error } | null = null;
+    promise.then(
+      () => { outcome = { ok: true }; },
+      (err: Error) => { outcome = { ok: false, err }; },
+    );
+
+    // Advance through timeout → SIGTERM
+    await vi.advanceTimersByTimeAsync(100);
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+
+    // Advance through kill grace → SIGKILL (still no 'close')
+    await vi.advanceTimersByTimeAsync(50);
+    expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+
+    // Backstop window passes — promise must settle even with zero child events.
+    await vi.advanceTimersByTimeAsync(25);
+    // Yield microtasks so the .then callback runs.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(outcome).not.toBeNull();
+    expect(outcome!.ok).toBe(false);
+    if (outcome && !outcome.ok) {
+      expect(outcome.err.message).toMatch(/did not exit after SIGKILL/);
+      expect(outcome.err.message).toMatch(/Releasing inflight refresh slot/);
+    }
+  });
+
+  it('late `close` after backstop is a no-op (settled-once invariant)', async () => {
+    const child = makeZombieChild();
+    const spawnFn = vi.fn(() => child as unknown as ReturnType<typeof import('child_process').spawn>);
+
+    const promise = refreshClaudeCodeOAuth(50, 25, 10, spawnFn as never);
+    let settleCount = 0;
+    promise.then(
+      () => { settleCount++; },
+      () => { settleCount++; },
+    );
+
+    // Walk through every deadline.
+    await vi.advanceTimersByTimeAsync(50 + 25 + 10);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(settleCount).toBe(1);
+
+    // Now the supposedly-zombie child emits 'close' late. This must be a no-op
+    // (cleanup detached the listener), and the promise must not double-settle.
+    child.emit('close', 0);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(settleCount).toBe(1);
+  });
+
+  it('happy path: resolves on close(0) without firing kill/backstop', async () => {
+    const child = makeZombieChild();
+    const spawnFn = vi.fn(() => child as unknown as ReturnType<typeof import('child_process').spawn>);
+
+    const promise = refreshClaudeCodeOAuth(100, 50, 25, spawnFn as never);
+    let resolved = false;
+    promise.then(
+      () => { resolved = true; },
+      () => { /* not expected */ },
+    );
+
+    // Child exits cleanly before any deadline fires.
+    await vi.advanceTimersByTimeAsync(10);
+    child.emit('close', 0);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(resolved).toBe(true);
+    expect(child.kill).not.toHaveBeenCalled();
   });
 });

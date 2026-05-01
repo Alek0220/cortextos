@@ -15,7 +15,7 @@
  * stdout has no assistant turn.
  */
 
-import { spawn } from 'child_process';
+import { spawn, type ChildProcess, type SpawnOptions } from 'child_process';
 import type { CouncilProvider } from '../types/index.js';
 import {
   resolveAnthropicAuth,
@@ -137,6 +137,16 @@ const CLAUDE_CODE_SYSTEM_PROMPT = "You are Claude Code, Anthropic's official CLI
 const REFRESH_TIMEOUT_MS = 30_000;
 /** After SIGTERM on timeout, give the child this long to exit before SIGKILL. */
 const REFRESH_KILL_GRACE_MS = 5_000;
+/**
+ * After SIGKILL, the absolute final deadline. If `'close'` still has not fired
+ * by then, force-reject the promise so `inflightRefresh` clears. Stalling
+ * forever is strictly worse than the rare case where a previous child remains
+ * a zombie — SIGKILL on macOS is unconditional except in uninterruptible-sleep
+ * scenarios that indicate a much bigger problem.
+ */
+const REFRESH_BACKSTOP_MS = 2_000;
+
+type SpawnFn = (command: string, args: readonly string[], options: SpawnOptions) => ChildProcess;
 
 /**
  * Reactively trigger a Claude Code SDK token refresh by running `claude -p`.
@@ -147,40 +157,77 @@ const REFRESH_KILL_GRACE_MS = 5_000;
  * token before making its own API call when the existing one is within its
  * pre-expiry buffer).
  *
- * The promise settles ONLY on `'close'` (or spawn `'error'`). Even on timeout,
- * we send SIGTERM, schedule SIGKILL after a grace period, and wait for
- * `'close'` before rejecting. This is critical: `dedupedRefresh` clears the
- * inflight slot in `.finally()`, so settling on the timeout deadline (while
- * the child is still alive) would let a subsequent caller spawn a second
- * `claude -p` concurrently with the first — exactly the single-writer
- * violation the deduplication exists to prevent.
+ * Settlement protocol — three-tier deadline:
+ *   1. Happy path: child emits `'close'` (or spawn `'error'`) → settle.
+ *   2. timeoutMs hits while child is still alive → SIGTERM, schedule SIGKILL,
+ *      then wait for `'close'` before settling. We deliberately do NOT settle
+ *      at the timeout deadline — `dedupedRefresh` clears the inflight slot in
+ *      `.finally()`, so settling while the child is still alive would let a
+ *      subsequent caller spawn a second `claude -p` concurrently — exactly
+ *      the single-writer violation the deduplication exists to prevent.
+ *   3. Backstop: if `'close'` still hasn't fired `backstopMs` after SIGKILL,
+ *      force-reject anyway so `inflightRefresh` clears. A permanently-stuck
+ *      `inflightRefresh` would stall ALL future refresh callers forever — far
+ *      worse than the rare uninterruptible-sleep edge case where a SIGKILL'd
+ *      child briefly outlives the promise. Listeners are detached so a late
+ *      `'close'` is a no-op.
  */
 export async function refreshClaudeCodeOAuth(
   timeoutMs: number = REFRESH_TIMEOUT_MS,
   killGraceMs: number = REFRESH_KILL_GRACE_MS,
+  backstopMs: number = REFRESH_BACKSTOP_MS,
+  spawnFn: SpawnFn = spawn,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn('claude', ['-p', 'ping'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawnFn('claude', ['-p', 'ping'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let settled = false;
     let timedOut = false;
     let killTimer: NodeJS.Timeout | undefined;
+    let backstopTimer: NodeJS.Timeout | undefined;
+
+    const cleanup = () => {
+      clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
+      if (backstopTimer) clearTimeout(backstopTimer);
+      child.removeAllListeners();
+      child.stdout?.removeAllListeners();
+      child.stderr?.removeAllListeners();
+    };
+    const finishResolve = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve();
+    };
+    const finishReject = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(err);
+    };
+
     const timer = setTimeout(() => {
       timedOut = true;
       child.kill('SIGTERM');
-      killTimer = setTimeout(() => child.kill('SIGKILL'), killGraceMs);
+      killTimer = setTimeout(() => {
+        child.kill('SIGKILL');
+        backstopTimer = setTimeout(() => {
+          finishReject(new Error(
+            `claude -p ping did not exit after SIGKILL ` +
+            `(timeout=${timeoutMs}ms, killGrace=${killGraceMs}ms, backstop=${backstopMs}ms). ` +
+            `Releasing inflight refresh slot; the next caller will retry.`,
+          ));
+        }, backstopMs);
+      }, killGraceMs);
     }, timeoutMs);
-    child.stdout.on('data', () => { /* drain */ });
-    child.stderr.on('data', () => { /* drain */ });
-    child.on('error', (err) => {
-      clearTimeout(timer);
-      if (killTimer) clearTimeout(killTimer);
-      reject(err);
-    });
+
+    child.stdout?.on('data', () => { /* drain */ });
+    child.stderr?.on('data', () => { /* drain */ });
+    child.on('error', (err) => finishReject(err));
     child.on('close', (code) => {
-      clearTimeout(timer);
-      if (killTimer) clearTimeout(killTimer);
-      if (timedOut) reject(new Error(`claude -p ping timed out after ${timeoutMs}ms`));
-      else if (code === 0) resolve();
-      else reject(new Error(`claude -p ping exited with code ${code}`));
+      if (timedOut) finishReject(new Error(`claude -p ping timed out after ${timeoutMs}ms`));
+      else if (code === 0) finishResolve();
+      else finishReject(new Error(`claude -p ping exited with code ${code}`));
     });
   });
 }
