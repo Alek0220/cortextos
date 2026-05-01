@@ -78,30 +78,87 @@ export async function dispatchCodex(
 }
 
 /**
- * Opus dispatcher — STUB for S1.
+ * Opus dispatcher — Anthropic Messages API.
  *
- * The real Opus invocation will go through the Anthropic Messages API
- * (the council needs structured JSON output from a parallel-channel
- * model, not a Claude Code session). Wiring that requires the API key
- * loader from `src/utils/env.ts` and a small fetch wrapper — both are
- * out of S1 scope.
+ * Invokes claude-opus-4-7 in single-shot mode (no tools, no streaming) and
+ * returns the assistant's text reply in the `stdout` field. The framed plan
+ * already enforces JSON-only output (see prompt.ts), so the reply text is
+ * the council JSON object itself. The extractor (utils/codex-output.ts)
+ * handles raw-JSON-in-stdout via its no-marker fallback path — no codex
+ * frame fabrication needed.
  *
- * For S1 the router falls back to stub dispatchers in tests, and the
- * CLI smoke test runs with `--member codex,codex` (two codex members
- * with different reasoning levels) until the Opus dispatcher lands in
- * S1.5. The plan doc (line 114) flags this as the deferred slice.
+ * Failure modes:
+ *   - Missing ANTHROPIC_API_KEY → exitCode:1, stderr explains.
+ *   - Non-2xx response → exitCode:1, stderr carries the API error body.
+ *   - Network error / abort → reject (router catches and records as error).
+ *
+ * The cwd argument is ignored (no rollout files to isolate — the API call
+ * is stateless), but kept in the signature for Dispatcher uniformity.
  */
+const OPUS_MODEL_DEFAULT = 'claude-opus-4-7';
+const OPUS_MAX_TOKENS = 4096;
+const ANTHROPIC_MESSAGES_URL = 'https://api.anthropic.com/v1/messages';
+const ANTHROPIC_VERSION = '2023-06-01';
+
 export async function dispatchOpus(
-  _member: CouncilMember,
-  _plan: string,
+  member: CouncilMember,
+  plan: string,
   _cwd: string,
-  _signal?: AbortSignal,
+  signal?: AbortSignal,
 ): Promise<DispatchResult> {
-  throw new Error(
-    'dispatchOpus: not implemented in S1. The Opus member dispatcher is scheduled for S1.5 ' +
-    '— see docs/plans/2026-05-01-cortextos-council-integration.md. Until then, run councils ' +
-    'with codex-only members or inject a custom dispatcher via Router.with({ dispatch }).',
-  );
+  const start = Date.now();
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    return {
+      stdout: '',
+      stderr: 'dispatchOpus: ANTHROPIC_API_KEY is not set in the environment.',
+      exitCode: 1,
+      latency_ms: Date.now() - start,
+    };
+  }
+
+  const model = member.model ?? OPUS_MODEL_DEFAULT;
+  const body = JSON.stringify({
+    model,
+    max_tokens: OPUS_MAX_TOKENS,
+    messages: [{ role: 'user', content: plan }],
+  });
+
+  const response = await fetch(ANTHROPIC_MESSAGES_URL, {
+    method: 'POST',
+    headers: {
+      'x-api-key': apiKey,
+      'anthropic-version': ANTHROPIC_VERSION,
+      'content-type': 'application/json',
+    },
+    body,
+    signal,
+  });
+
+  const latency_ms = Date.now() - start;
+
+  if (!response.ok) {
+    const errBody = await response.text().catch(() => '<unreadable>');
+    return {
+      stdout: '',
+      stderr: `dispatchOpus: HTTP ${response.status} ${response.statusText}\n${errBody}`,
+      exitCode: 1,
+      latency_ms,
+    };
+  }
+
+  const json = (await response.json()) as { content?: Array<{ type: string; text?: string }> };
+  const text = (json.content ?? [])
+    .filter((b) => b.type === 'text' && typeof b.text === 'string')
+    .map((b) => b.text as string)
+    .join('');
+
+  return {
+    stdout: text,
+    stderr: '',
+    exitCode: 0,
+    latency_ms,
+  };
 }
 
 /**
