@@ -8,9 +8,12 @@
  * reasoning) via the runCouncil router, and translates the merged
  * verdict into an allow/deny PermissionRequest decision.
  *
- * For S1 the council members are codex-only (the Opus dispatcher is a
- * stub deferred to S1.5 — see src/council/dispatch.ts). Once Opus lands,
- * swap CTX_COUNCIL_MEMBERS or change the default below.
+ * Default roster is codex-only (codex-high + codex-low) — opting opus into
+ * a council costs an Anthropic API call per gated tool, so it stays opt-in.
+ * dispatchOpus is fully implemented (S1.5–S1.7.2: Messages API, OAuth
+ * keychain auth, reactive refresh, process-wide dedup, refresh backstop).
+ * To enable opus on a per-agent basis, set CTX_COUNCIL_MEMBERS to a JSON
+ * array including e.g. `{"id":"opus-a","provider":"opus"}`.
  *
  * Default-deny on every error path:
  *   - missing config           → deny ("council gate not configured")
