@@ -32,6 +32,21 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
+  // Defer tools listed in CTX_COUNCIL_GATE_TOOLS to the specialized
+  // council-gate matcher. Both hooks fire on every PermissionRequest, so
+  // catch-all telegram must yield (no decision emitted) on tools the
+  // council owns — otherwise the user gets two prompts and a race.
+  // Per-agent: env var unset → no defer (telegram asks for everything).
+  const gateTools = new Set(
+    (process.env.CTX_COUNCIL_GATE_TOOLS || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
+  if (gateTools.has(tool_name)) {
+    process.exit(0);
+  }
+
   const env = loadEnv();
 
   if (!env.botToken || !env.chatId) {

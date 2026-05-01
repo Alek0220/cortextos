@@ -31,6 +31,14 @@
  * Bash PermissionRequest on an analyst agent goes through the council
  * (telegram still owns Edit/Write/etc.). Other templates remain opt-in:
  * register the hook and set CTX_COUNCIL_GATE_TOOLS to activate.
+ *
+ * NOTE on coexistence: CTX_COUNCIL_GATE_TOOLS is a *shared coordination
+ * signal*, not a private council-only filter. The catch-all
+ * `hook-permission-telegram` reads the same env var and short-circuits
+ * (process.exit(0), no decision emitted) for any tool listed there, so the
+ * Bash matcher's council-gate becomes the sole authority on those calls
+ * without telegram also asking the user. Adding/removing a tool from this
+ * env CSV adjusts both hooks atomically.
  */
 
 import { join } from 'path';
