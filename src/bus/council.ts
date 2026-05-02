@@ -83,6 +83,8 @@ export function createCouncil(
     results: [],
     merged: null,
     signed_envelope: null,
+    outcome: null,
+    outcome_labeled_at: null,
   };
 
   const dir = councilDir(paths, id);
@@ -148,8 +150,13 @@ export function finalizeCouncil(
   request.resolved_at = request.updated_at;
   if (!merged) {
     request.status = 'failed';
+    request.outcome = null;
+    request.outcome_labeled_at = null;
   } else {
     request.status = merged.verdict === 'approve' ? 'approved' : 'blocked';
+    // Council-self trajectory label (ruflo W1): merged verdict IS the outcome.
+    request.outcome = merged.verdict === 'approve' ? 'success' : 'failure';
+    request.outcome_labeled_at = request.updated_at;
   }
   writeCouncil(paths, request);
   return request;

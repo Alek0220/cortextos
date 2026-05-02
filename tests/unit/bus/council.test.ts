@@ -151,3 +151,42 @@ describe('listCouncils / listPendingCouncils', () => {
     expect(raw).toContain('\n  "id"');
   });
 });
+
+describe('trajectory outcome label (ruflo W1, council-self)', () => {
+  it('initializes outcome=null and outcome_labeled_at=null at create time', () => {
+    const req = createCouncil(paths, 'org', 'agent', 'adversarial', 'plan');
+    expect(req.outcome).toBeNull();
+    expect(req.outcome_labeled_at).toBeNull();
+  });
+
+  it('labels outcome=success when finalized with merged.verdict==="approve"', () => {
+    const req = createCouncil(paths, 'org', 'agent', 'adversarial', 'plan');
+    const fin = finalizeCouncil(paths, req.id, { verdict: 'approve', concerns: [], must_fix: [] });
+    expect(fin.outcome).toBe('success');
+    expect(fin.outcome_labeled_at).toBe(fin.updated_at);
+    expect(fin.outcome_labeled_at).not.toBeNull();
+  });
+
+  it('labels outcome=failure when finalized with merged.verdict==="block"', () => {
+    const req = createCouncil(paths, 'org', 'agent', 'adversarial', 'plan');
+    const fin = finalizeCouncil(paths, req.id, { verdict: 'block', concerns: ['c'], must_fix: ['m'] });
+    expect(fin.outcome).toBe('failure');
+    expect(fin.outcome_labeled_at).toBe(fin.updated_at);
+  });
+
+  it('leaves outcome=null and outcome_labeled_at=null when merged is null (failed council)', () => {
+    const req = createCouncil(paths, 'org', 'agent', 'adversarial', 'plan');
+    const fin = finalizeCouncil(paths, req.id, null);
+    expect(fin.status).toBe('failed');
+    expect(fin.outcome).toBeNull();
+    expect(fin.outcome_labeled_at).toBeNull();
+  });
+
+  it('persists outcome fields to request.json on disk for downstream reranker reads', () => {
+    const req = createCouncil(paths, 'org', 'agent', 'adversarial', 'plan');
+    finalizeCouncil(paths, req.id, { verdict: 'approve', concerns: [], must_fix: [] });
+    const onDisk = JSON.parse(readFileSync(join(councilDir(paths, req.id), 'request.json'), 'utf-8'));
+    expect(onDisk.outcome).toBe('success');
+    expect(typeof onDisk.outcome_labeled_at).toBe('string');
+  });
+});

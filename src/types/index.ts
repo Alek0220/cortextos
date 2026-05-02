@@ -199,6 +199,14 @@ export interface CouncilRequest {
   /** Ed25519 signature over the merged verdict (S1.8). null when merge produced no verdict.
    *  Optional to keep backward compatibility with pre-S1.8 council records on disk. */
   signed_envelope?: SignedVerdictEnvelope | null;
+  /** Trajectory outcome label for the success-reranker (ruflo W1).
+   *  'success' when merged.verdict==='approve', 'failure' when 'block', null when failed/no merge.
+   *  Source: council-self — the merged verdict IS the label. Circular by design (the reranker
+   *  learns "what this council approves"); accepted trade-off for a zero-cost label. Optional
+   *  for backward compatibility with pre-W1 records. */
+  outcome?: 'success' | 'failure' | null;
+  /** ISO 8601 timestamp when `outcome` was assigned (== finalize time for council-self). */
+  outcome_labeled_at?: string | null;
 }
 
 // Agent Config Types (config.json)
