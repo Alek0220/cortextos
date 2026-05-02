@@ -6,9 +6,11 @@ import { runCouncil } from '../../../src/council/router.js';
 import type { Dispatcher } from '../../../src/council/dispatch.js';
 import type { BusPaths } from '../../../src/types/index.js';
 import { councilDir } from '../../../src/bus/council.js';
+import { verifyVerdict } from '../../../src/council/signing.js';
 
 let tmpRoot: string;
 let paths: BusPaths;
+let prevKeyPath: string | undefined;
 
 beforeEach(() => {
   tmpRoot = mkdtempSync(join(tmpdir(), 'ctx-router-'));
@@ -24,9 +26,14 @@ beforeEach(() => {
     analyticsDir: join(tmpRoot, 'analytics'),
     deliverablesDir: join(tmpRoot, 'deliverables'),
   };
+  // Isolate signing keypair to per-test tmpdir so tests don't write to ~/.cortextos.
+  prevKeyPath = process.env.CORTEXTOS_COUNCIL_KEY_PATH;
+  process.env.CORTEXTOS_COUNCIL_KEY_PATH = join(tmpRoot, 'council-keypair.json');
 });
 
 afterEach(() => {
+  if (prevKeyPath === undefined) delete process.env.CORTEXTOS_COUNCIL_KEY_PATH;
+  else process.env.CORTEXTOS_COUNCIL_KEY_PATH = prevKeyPath;
   try { rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* noop */ }
 });
 
@@ -216,5 +223,67 @@ describe('runCouncil — end-to-end with stub dispatcher', () => {
     expect(slow?.verdict).toBeNull();
     expect(slow?.error).toBe('timeout');
     expect(request.status).toBe('failed');
+  });
+});
+
+describe('runCouncil — S1.8 signed verdict envelopes', () => {
+  it('every approved council writes a verifiable signed envelope', async () => {
+    const dispatch = stubDispatcher({
+      m1: { stdout: codexOutput('approve') },
+      m2: { stdout: codexOutput('approve') },
+    });
+    const { request } = await runCouncil({
+      paths, org: 'test', requestingAgent: 'orch', kind: 'adversarial', plan: 'plan',
+      members: [{ id: 'm1', provider: 'codex' }, { id: 'm2', provider: 'codex' }],
+      dispatch,
+    });
+    expect(request.status).toBe('approved');
+    expect(request.signed_envelope).not.toBeNull();
+    expect(request.signed_envelope!.verdict).toEqual(request.merged);
+    expect(request.signed_envelope!.council_id).toBe(request.id);
+    expect(request.signed_envelope!.members).toEqual(['m1', 'm2']);
+    expect(await verifyVerdict(request.signed_envelope!)).toBe(true);
+  });
+
+  it('every blocked council writes a verifiable signed envelope', async () => {
+    const dispatch = stubDispatcher({
+      m1: { stdout: codexOutput('approve') },
+      m2: { stdout: codexOutput('block', ['add tests']) },
+    });
+    const { request } = await runCouncil({
+      paths, org: 'test', requestingAgent: 'orch', kind: 'adversarial', plan: 'plan',
+      members: [{ id: 'm1', provider: 'codex' }, { id: 'm2', provider: 'codex' }],
+      dispatch,
+    });
+    expect(request.status).toBe('blocked');
+    expect(request.signed_envelope).not.toBeNull();
+    expect(await verifyVerdict(request.signed_envelope!)).toBe(true);
+  });
+
+  it('failed councils have signed_envelope=null (no verdict to sign)', async () => {
+    const dispatch = stubDispatcher({
+      m1: { stdout: 'no JSON', exitCode: 1 },
+      m2: { stdout: 'also no JSON', exitCode: 1 },
+    });
+    const { request } = await runCouncil({
+      paths, org: 'test', requestingAgent: 'orch', kind: 'adversarial', plan: 'plan',
+      members: [{ id: 'm1', provider: 'codex' }, { id: 'm2', provider: 'codex' }],
+      dispatch,
+    });
+    expect(request.status).toBe('failed');
+    expect(request.merged).toBeNull();
+    expect(request.signed_envelope).toBeNull();
+  });
+
+  it('persisted request.json on disk contains the signed envelope', async () => {
+    const dispatch = stubDispatcher({ m1: { stdout: codexOutput('approve') } });
+    const { request } = await runCouncil({
+      paths, org: 'test', requestingAgent: 'orch', kind: 'adversarial', plan: 'plan',
+      members: [{ id: 'm1', provider: 'codex' }], dispatch,
+    });
+    const onDisk = JSON.parse(readFileSync(join(councilDir(paths, request.id), 'request.json'), 'utf-8'));
+    expect(onDisk.signed_envelope).not.toBeNull();
+    expect(onDisk.signed_envelope.algorithm).toBe('ed25519');
+    expect(await verifyVerdict(onDisk.signed_envelope)).toBe(true);
   });
 });

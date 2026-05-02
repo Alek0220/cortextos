@@ -172,6 +172,16 @@ export interface CouncilMemberResult {
   error?: string;
 }
 
+export interface SignedVerdictEnvelope {
+  verdict: CouncilVerdictJson;
+  council_id: string;
+  members: string[];
+  timestamp: string;
+  signing_pubkey: string;
+  signature: string;
+  algorithm: 'ed25519';
+}
+
 export interface CouncilRequest {
   id: string;
   kind: CouncilKind;
@@ -186,6 +196,9 @@ export interface CouncilRequest {
   results: CouncilMemberResult[];
   /** Merged verdict after all members complete; null until quorum. */
   merged: CouncilVerdictJson | null;
+  /** Ed25519 signature over the merged verdict (S1.8). null when merge produced no verdict.
+   *  Optional to keep backward compatibility with pre-S1.8 council records on disk. */
+  signed_envelope?: SignedVerdictEnvelope | null;
 }
 
 // Agent Config Types (config.json)

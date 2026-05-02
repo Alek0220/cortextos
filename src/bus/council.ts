@@ -6,6 +6,7 @@ import type {
   CouncilRequest,
   CouncilStatus,
   CouncilVerdictJson,
+  SignedVerdictEnvelope,
   BusPaths,
 } from '../types/index.js';
 import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
@@ -81,6 +82,7 @@ export function createCouncil(
     resolved_at: null,
     results: [],
     merged: null,
+    signed_envelope: null,
   };
 
   const dir = councilDir(paths, id);
@@ -137,9 +139,11 @@ export function finalizeCouncil(
   paths: BusPaths,
   id: string,
   merged: CouncilVerdictJson | null,
+  signedEnvelope: SignedVerdictEnvelope | null = null,
 ): CouncilRequest {
   const request = readCouncil(paths, id);
   request.merged = merged;
+  request.signed_envelope = signedEnvelope;
   request.updated_at = nowIso();
   request.resolved_at = request.updated_at;
   if (!merged) {

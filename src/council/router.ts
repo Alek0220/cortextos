@@ -38,6 +38,8 @@ import { blindLabel } from './anonymize.js';
 import { mergeVerdicts } from './merge.js';
 import { defaultDispatcher, type CouncilMember, type Dispatcher } from './dispatch.js';
 import { frameCouncilPrompt } from './prompt.js';
+import { signVerdict } from './signing.js';
+import type { SignedVerdictEnvelope } from '../types/index.js';
 import type {
   BusPaths,
   CouncilKind,
@@ -123,7 +125,26 @@ export async function runCouncil(opts: RouterOptions): Promise<RouterResult> {
 
     const { blinded, mapping } = blindLabel(results);
     const merged = mergeVerdicts(blinded);
-    const finalRequest = finalizeCouncil(opts.paths, initial.id, merged);
+
+    // S1.8: sign the merged verdict so downstream consumers (dashboard,
+    // telegram audit log) can detect tampering between finalize and read.
+    // Signing is sign-only — verification is a downstream concern. A signing
+    // failure must not silently drop the council, so we record the failure
+    // path but still finalize with envelope=null.
+    let envelope: SignedVerdictEnvelope | null = null;
+    if (merged) {
+      try {
+        envelope = await signVerdict({
+          verdict: merged,
+          council_id: initial.id,
+          members: results.map((r) => r.member_id),
+        });
+      } catch {
+        envelope = null;
+      }
+    }
+
+    const finalRequest = finalizeCouncil(opts.paths, initial.id, merged, envelope);
 
     return { request: finalRequest, labelMapping: mapping.toOriginal };
   } finally {
