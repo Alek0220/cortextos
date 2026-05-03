@@ -4,6 +4,7 @@ import { join } from 'path';
 import { homedir } from 'os';
 import type { BusPaths } from '../types/index.js';
 import { normalizeOrgName } from '../utils/org.js';
+import { loadOutcomeCorpus, rerankBySuccess } from '../council/success-reranker.js';
 
 /**
  * Knowledge base integration — calls mmrag.py directly (cross-platform,
@@ -126,9 +127,16 @@ export function queryKnowledgeBase(
     threshold?: number;
     frameworkRoot: string;
     instanceId: string;
+    /** Opt-in ruflo W2-3 success reranker. Reorders results using past
+     *  council outcomes (boost approved-overlap, penalize blocked-overlap).
+     *  Default false — preserves the bare similarity ranking.
+     *  Off-by-default until trajectory N is large enough for the signal
+     *  to dominate noise (~200 trajectories per advisor). */
+    rerankBySuccess?: boolean;
   },
 ): KBQueryResponse {
   const { agent, scope = 'all', topK = 5, threshold = 0.5, frameworkRoot, instanceId } = options;
+  const useReranker = options.rerankBySuccess ?? false;
   // Normalize once at the top so every downstream path join, env var, and
   // ChromaDB collection name uses the canonical filesystem casing. Without
   // this, `shared-acmecorp` and `shared-AcmeCorp` become two
@@ -224,6 +232,20 @@ export function queryKnowledgeBase(
     }
 
     if (allResults.length > 0) {
+      if (useReranker) {
+        const corpus = loadOutcomeCorpus(paths);
+        const reranked = rerankBySuccess(
+          allResults.map((r, i) => ({ id: String(i), content: r.content, score: r.score })),
+          corpus,
+        );
+        const byId = new Map(allResults.map((r, i) => [String(i), r]));
+        allResults = reranked
+          .map((rr) => {
+            const orig = byId.get(rr.id);
+            return orig ? { ...orig, score: rr.rerank_score } : null;
+          })
+          .filter((x): x is KBQueryResult => x !== null);
+      }
       return {
         results: allResults,
         total: allResults.length,

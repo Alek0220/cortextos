@@ -196,3 +196,35 @@ describe('kb warn messages — UX invariants', () => {
     expect(specificOrgWarns.every((m) => /run setup/i.test(m))).toBe(true);
   });
 });
+
+describe('queryKnowledgeBase — ruflo W2-3 reranker opt-in', () => {
+  it('rerankBySuccess: false (default) returns results in similarity order untouched', () => {
+    mockConfiguredKb();
+    execFileSyncMock.mockReturnValue(
+      JSON.stringify({
+        results: [
+          { content: 'first hit, score high', similarity: 0.9, source: 'a.md', type: 'markdown' },
+          { content: 'second hit, score lower', similarity: 0.5, source: 'b.md', type: 'markdown' },
+        ],
+      }),
+    );
+    const result = queryKnowledgeBase(dummyPaths, 'q', { ...baseOptions, scope: 'shared' });
+    expect(result.results.map((r) => r.score)).toEqual([0.9, 0.5]);
+  });
+
+  it('rerankBySuccess: true with empty corpus produces same order, scores unchanged', () => {
+    mockConfiguredKb();
+    execFileSyncMock.mockReturnValue(
+      JSON.stringify({
+        results: [
+          { content: 'alpha', similarity: 0.9, source: 'a.md', type: 'markdown' },
+          { content: 'beta', similarity: 0.5, source: 'b.md', type: 'markdown' },
+        ],
+      }),
+    );
+    // No councils on disk → empty corpus → boost=penalty=0 → rerank_score == score → stable order.
+    const result = queryKnowledgeBase(dummyPaths, 'q', { ...baseOptions, scope: 'shared', rerankBySuccess: true });
+    expect(result.results.map((r) => r.content)).toEqual(['alpha', 'beta']);
+    expect(result.results.map((r) => r.score)).toEqual([0.9, 0.5]);
+  });
+});
