@@ -174,3 +174,84 @@ councilCommand
     }
     process.stdout.write(JSON.stringify(r, null, 2) + '\n');
   });
+
+/**
+ * Ruflo trajectory readiness threshold for the deferred W5-6 neural
+ * router. Tracked here so `cortextos council stats` can report the
+ * gate's progress without operators having to remember it.
+ */
+export const RUFLO_W5_6_TRAJECTORY_THRESHOLD = 200;
+
+export interface CouncilStats {
+  counts: {
+    total: number;
+    approved: number;
+    blocked: number;
+    failed: number;
+    timeout: number;
+    pending: number;
+    running: number;
+  };
+  ruflo: {
+    labeled_trajectories: number;
+    w5_6_threshold: number;
+    w5_6_ready: boolean;
+    progress_pct: number;
+  };
+}
+
+/** Pure tally — exported for unit tests. */
+export function computeCouncilStats(
+  all: import('../types/index.js').CouncilRequest[],
+  threshold: number = RUFLO_W5_6_TRAJECTORY_THRESHOLD,
+): CouncilStats {
+  const counts = {
+    total: all.length,
+    approved: all.filter((c) => c.status === 'approved').length,
+    blocked: all.filter((c) => c.status === 'blocked').length,
+    failed: all.filter((c) => c.status === 'failed').length,
+    timeout: all.filter((c) => c.status === 'timeout').length,
+    pending: all.filter((c) => c.status === 'pending').length,
+    running: all.filter((c) => c.status === 'running').length,
+  };
+  const labeled = all.filter((c) => c.outcome != null).length;
+  return {
+    counts,
+    ruflo: {
+      labeled_trajectories: labeled,
+      w5_6_threshold: threshold,
+      w5_6_ready: labeled >= threshold,
+      progress_pct: Math.min(100, Math.round((labeled / threshold) * 100)),
+    },
+  };
+}
+
+councilCommand
+  .command('stats')
+  .description('Council outcome counts and ruflo W5-6 readiness')
+  .requiredOption('--org <org>', 'Org name')
+  .option('--instance <id>', 'cortextos instance id (default: default)')
+  .option('--agent <name>', 'Requesting agent name (default: cli)')
+  .option('--json', 'Output raw JSON')
+  .action((opts: { org: string; instance?: string; agent?: string; json?: boolean }) => {
+    const agent = opts.agent ?? 'cli';
+    const instance = opts.instance ?? 'default';
+    const paths = resolvePaths(agent, instance, opts.org);
+    const stats = computeCouncilStats(listCouncils(paths));
+    const { counts, ruflo } = stats;
+    if (opts.json) {
+      process.stdout.write(JSON.stringify(stats, null, 2) + '\n');
+      return;
+    }
+    process.stdout.write(`Council outcomes (org=${opts.org}):\n`);
+    process.stdout.write(`  total:    ${counts.total}\n`);
+    process.stdout.write(`  approved: ${counts.approved}\n`);
+    process.stdout.write(`  blocked:  ${counts.blocked}\n`);
+    process.stdout.write(`  failed:   ${counts.failed}\n`);
+    process.stdout.write(`  timeout:  ${counts.timeout}\n`);
+    process.stdout.write(`  pending:  ${counts.pending}\n`);
+    process.stdout.write(`  running:  ${counts.running}\n`);
+    process.stdout.write(`\nRuflo W5-6 readiness:\n`);
+    process.stdout.write(`  labeled trajectories: ${ruflo.labeled_trajectories} / ${ruflo.w5_6_threshold} (${ruflo.progress_pct}%)\n`);
+    process.stdout.write(`  ready:                ${ruflo.w5_6_ready ? 'YES — neural router unlock candidate' : 'no — keep accumulating'}\n`);
+  });
