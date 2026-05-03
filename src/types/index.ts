@@ -172,6 +172,23 @@ export interface CouncilMemberResult {
   error?: string;
 }
 
+/** Persisted record of which members the router policy decided to dispatch (ruflo W4).
+ *  Lives on disk inside CouncilRequest so the W2-3 reranker and W5-6 neural router
+ *  have ground-truth tuples even when a heuristic narrowed the candidate set. */
+export interface PolicyExclusion {
+  member_id: string;
+  reason: string;
+}
+
+export interface PolicyDecision {
+  /** Stable identifier of the policy that produced this decision (e.g. "heuristic-advisory-length/v1"). */
+  policy_id: string;
+  /** Member ids the policy chose to dispatch. */
+  included: string[];
+  /** Members the policy excluded, with a human-readable reason. */
+  excluded: PolicyExclusion[];
+}
+
 export interface SignedVerdictEnvelope {
   verdict: CouncilVerdictJson;
   council_id: string;
@@ -207,6 +224,10 @@ export interface CouncilRequest {
   outcome?: 'success' | 'failure' | null;
   /** ISO 8601 timestamp when `outcome` was assigned (== finalize time for council-self). */
   outcome_labeled_at?: string | null;
+  /** Router policy decision (ruflo W4): which members the policy dispatched and why others were dropped.
+   *  Optional for backward compatibility with pre-W4 records. Persisted so reranker/neural router have
+   *  ground-truth tuples even when a heuristic narrowed the set. */
+  policy_decision?: PolicyDecision | null;
 }
 
 // Agent Config Types (config.json)

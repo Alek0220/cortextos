@@ -32,6 +32,8 @@ import {
   finalizeCouncil,
   setCouncilStatus,
   councilDir,
+  readCouncil,
+  writeCouncil,
 } from '../bus/council.js';
 import { extractCouncilVerdict } from '../utils/codex-output.js';
 import { blindLabel } from './anonymize.js';
@@ -39,6 +41,7 @@ import { mergeVerdicts } from './merge.js';
 import { defaultDispatcher, type CouncilMember, type Dispatcher } from './dispatch.js';
 import { frameCouncilPrompt } from './prompt.js';
 import { signVerdict } from './signing.js';
+import { defaultPolicy, type RouterPolicy } from './router-policy.js';
 import type { SignedVerdictEnvelope } from '../types/index.js';
 import type {
   BusPaths,
@@ -59,6 +62,12 @@ export interface RouterOptions {
   timeoutMs?: number;
   /** Test seam — inject a stub dispatcher to avoid real model calls. */
   dispatch?: Dispatcher;
+  /** Member-selection policy applied BEFORE dispatch (ruflo W4). Defaults to
+   *  defaultPolicy (include-all) for backward compat. Pass heuristicPolicy or a
+   *  future neural policy to narrow the set; the decision is persisted into the
+   *  CouncilRequest so the success-reranker (W2-3) and neural router (W5-6)
+   *  have ground-truth tuples even when the heuristic dropped members. */
+  policy?: RouterPolicy;
 }
 
 export interface RouterResult {
@@ -71,9 +80,25 @@ const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 
 export async function runCouncil(opts: RouterOptions): Promise<RouterResult> {
   const dispatch = opts.dispatch ?? defaultDispatcher;
+  const policy = opts.policy ?? defaultPolicy;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
   const initial = createCouncil(opts.paths, opts.org, opts.requestingAgent, opts.kind, opts.plan);
+
+  // Apply router policy BEFORE dispatch — narrows the candidate set and
+  // persists the decision into the request for downstream learning loops.
+  const decision = policy({
+    kind: opts.kind,
+    plan: opts.plan,
+    members: opts.members,
+    requesting_agent: opts.requestingAgent,
+  });
+  const includedSet = new Set(decision.included);
+  const dispatchMembers = opts.members.filter((m) => includedSet.has(m.id));
+  const stamped = readCouncil(opts.paths, initial.id);
+  stamped.policy_decision = decision;
+  writeCouncil(opts.paths, stamped);
+
   setCouncilStatus(opts.paths, initial.id, 'running');
 
   const cwd = councilDir(opts.paths, initial.id);
@@ -85,7 +110,7 @@ export async function runCouncil(opts: RouterOptions): Promise<RouterResult> {
   const framedPlan = frameCouncilPrompt(opts.kind, opts.plan);
 
   try {
-    const memberPromises = opts.members.map(async (member): Promise<CouncilMemberResult> => {
+    const memberPromises = dispatchMembers.map(async (member): Promise<CouncilMemberResult> => {
       const start = Date.now();
       try {
         const dispatched = await dispatch(member, framedPlan, cwd, ac.signal);

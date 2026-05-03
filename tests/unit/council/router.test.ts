@@ -7,6 +7,7 @@ import type { Dispatcher } from '../../../src/council/dispatch.js';
 import type { BusPaths } from '../../../src/types/index.js';
 import { councilDir } from '../../../src/bus/council.js';
 import { verifyVerdict } from '../../../src/council/signing.js';
+import { heuristicPolicy } from '../../../src/council/router-policy.js';
 
 let tmpRoot: string;
 let paths: BusPaths;
@@ -285,5 +286,60 @@ describe('runCouncil — S1.8 signed verdict envelopes', () => {
     expect(onDisk.signed_envelope).not.toBeNull();
     expect(onDisk.signed_envelope.algorithm).toBe('ed25519');
     expect(await verifyVerdict(onDisk.signed_envelope)).toBe(true);
+  });
+});
+
+describe('runCouncil — ruflo W4 router policy integration', () => {
+  it('default policy includes every member and persists policy_decision', async () => {
+    const dispatch = stubDispatcher({
+      m1: { stdout: codexOutput('approve') },
+      m2: { stdout: codexOutput('approve') },
+    });
+    const { request } = await runCouncil({
+      paths, org: 'test', requestingAgent: 'orch', kind: 'adversarial', plan: 'plan',
+      members: [{ id: 'm1', provider: 'codex' }, { id: 'm2', provider: 'codex' }],
+      dispatch,
+    });
+    expect(request.policy_decision).toBeDefined();
+    expect(request.policy_decision!.policy_id).toBe('default-include-all/v1');
+    expect(request.policy_decision!.included.sort()).toEqual(['m1', 'm2']);
+    expect(request.policy_decision!.excluded).toEqual([]);
+    // Both members actually dispatched.
+    expect(request.results).toHaveLength(2);
+  });
+
+  it('heuristic policy on short advisory plan drops opus and only dispatches included members', async () => {
+    const codexCalls: string[] = [];
+    const opusCalls: string[] = [];
+    const dispatch: Dispatcher = async (member) => {
+      if (member.provider === 'opus') opusCalls.push(member.id);
+      else codexCalls.push(member.id);
+      return { stdout: codexOutput('approve'), stderr: '', exitCode: 0, latency_ms: 10 };
+    };
+    const { request } = await runCouncil({
+      paths, org: 'test', requestingAgent: 'orch', kind: 'advisory', plan: 'tiny plan',
+      members: [{ id: 'opus-a', provider: 'opus' }, { id: 'codex-a', provider: 'codex' }],
+      dispatch,
+      policy: heuristicPolicy,
+    });
+    expect(opusCalls).toEqual([]);
+    expect(codexCalls).toEqual(['codex-a']);
+    expect(request.policy_decision!.policy_id).toBe('heuristic-advisory-length/v1');
+    expect(request.policy_decision!.included).toEqual(['codex-a']);
+    expect(request.policy_decision!.excluded.map((e) => e.member_id)).toEqual(['opus-a']);
+    expect(request.results).toHaveLength(1);
+    expect(request.results[0].member_id).toBe('codex-a');
+  });
+
+  it('persists policy_decision to request.json on disk', async () => {
+    const dispatch = stubDispatcher({ m1: { stdout: codexOutput('approve') } });
+    const { request } = await runCouncil({
+      paths, org: 'test', requestingAgent: 'orch', kind: 'adversarial', plan: 'plan',
+      members: [{ id: 'm1', provider: 'codex' }], dispatch,
+    });
+    const onDisk = JSON.parse(readFileSync(join(councilDir(paths, request.id), 'request.json'), 'utf-8'));
+    expect(onDisk.policy_decision).toBeDefined();
+    expect(onDisk.policy_decision.policy_id).toBe('default-include-all/v1');
+    expect(onDisk.policy_decision.included).toEqual(['m1']);
   });
 });
