@@ -54,12 +54,34 @@ describe('computeCouncilStats', () => {
     expect(s.counts.running).toBe(1);
   });
 
-  it('labeled trajectories count only outcomes that are non-null', () => {
+  it('labeled trajectories count explicit outcomes', () => {
     const s = computeCouncilStats([
-      mk({ outcome: 'approve' as any }),
-      mk({ outcome: 'block' as any }),
-      mk({ outcome: null as any }),
-      mk({}),
+      mk({ outcome: 'success' as any, status: 'pending' }),
+      mk({ outcome: 'failure' as any, status: 'pending' }),
+      mk({ outcome: null as any, status: 'pending' }),
+      mk({ status: 'pending' }),
+    ]);
+    expect(s.ruflo.labeled_trajectories).toBe(2);
+  });
+
+  it('labeled trajectories backfill: terminal status counts when outcome absent', () => {
+    // Legacy councils written before W1 added the outcome field still have a
+    // verdict (status=approved/blocked), and the verdict IS the label.
+    const s = computeCouncilStats([
+      mk({ status: 'approved' }),     // legacy approved → labeled
+      mk({ status: 'blocked' }),      // legacy blocked → labeled
+      mk({ status: 'failed' }),       // failed → NOT labeled
+      mk({ status: 'pending' }),      // pending → NOT labeled
+      mk({ status: 'running' }),      // running → NOT labeled
+      mk({ status: 'timeout' }),      // timeout → NOT labeled
+    ]);
+    expect(s.ruflo.labeled_trajectories).toBe(2);
+  });
+
+  it('labeled trajectories: explicit outcome and terminal status do not double-count', () => {
+    const s = computeCouncilStats([
+      mk({ status: 'approved', outcome: 'success' as any }),
+      mk({ status: 'blocked', outcome: 'failure' as any }),
     ]);
     expect(s.ruflo.labeled_trajectories).toBe(2);
   });

@@ -214,7 +214,13 @@ export function computeCouncilStats(
     pending: all.filter((c) => c.status === 'pending').length,
     running: all.filter((c) => c.status === 'running').length,
   };
-  const labeled = all.filter((c) => c.outcome != null).length;
+  // Labeled trajectories = anything with an explicit W1 outcome OR a terminal
+  // verdict (approved/blocked) on legacy councils that predate the outcome
+  // field. The verdict IS the label by W1's own circular-by-design contract,
+  // so legacy records count toward the W5-6 training corpus gate.
+  const labeled = all.filter(
+    (c) => c.outcome != null || c.status === 'approved' || c.status === 'blocked',
+  ).length;
   return {
     counts,
     ruflo: {
