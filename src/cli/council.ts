@@ -20,7 +20,8 @@
  */
 
 import { Command } from 'commander';
-import { readFileSync, existsSync } from 'fs';
+import { readFileSync, existsSync, readdirSync, statSync } from 'fs';
+import { join } from 'path';
 import { resolvePaths } from '../utils/paths.js';
 import { runCouncil } from '../council/router.js';
 import { readCouncil, listCouncils } from '../bus/council.js';
@@ -176,6 +177,21 @@ councilCommand
   });
 
 /**
+ * Glob a phase directory for *-PLAN.md files. Matches gsd's
+ * `.planning/phases/{NN}-{slug}/` convention. Pure / unit-testable —
+ * exported for tests/unit/cli/council-on-plans.test.ts.
+ */
+export function findPlanFiles(phaseDir: string): string[] {
+  if (!existsSync(phaseDir) || !statSync(phaseDir).isDirectory()) {
+    return [];
+  }
+  return readdirSync(phaseDir)
+    .filter((f) => /-PLAN\.md$/i.test(f) || /^PLAN\.md$/i.test(f))
+    .sort()
+    .map((f) => join(phaseDir, f));
+}
+
+/**
  * Ruflo trajectory readiness threshold for the deferred W5-6 neural
  * router. Tracked here so `cortextos council stats` can report the
  * gate's progress without operators having to remember it.
@@ -260,4 +276,147 @@ councilCommand
     process.stdout.write(`\nRuflo W5-6 readiness:\n`);
     process.stdout.write(`  labeled trajectories: ${ruflo.labeled_trajectories} / ${ruflo.w5_6_threshold} (${ruflo.progress_pct}%)\n`);
     process.stdout.write(`  ready:                ${ruflo.w5_6_ready ? 'YES — neural router unlock candidate' : 'no — keep accumulating'}\n`);
+  });
+
+/**
+ * Per-plan result row used by the on-plans summary printer.
+ * Exported so the unit test can drive `summarizeOnPlans` directly
+ * without needing a live runCouncil dispatch.
+ */
+export interface OnPlansResult {
+  file: string;
+  status: 'approved' | 'blocked' | 'failed' | 'timeout' | 'pending' | 'running';
+  must_fix: string[];
+  request_id: string;
+}
+
+export interface OnPlansSummary {
+  total: number;
+  approved: number;
+  blocked: number;
+  failed: number;
+  exitCode: 0 | 1 | 2;
+}
+
+/**
+ * Pure summary tally + exit-code resolver for on-plans. Exported for tests.
+ *
+ * Exit semantics:
+ *   - any failed/timeout    → 1 (operational error trumps everything)
+ *   - any blocked AND blockOnVerdict → 2
+ *   - else                  → 0
+ *
+ * Default is report-only (blockOnVerdict=false) so on-plans can run inside
+ * a gsd workflow without halting it on a council disagreement — operators
+ * read the must_fix list and choose. --block-on-verdict makes it a hard gate.
+ */
+export function summarizeOnPlans(
+  results: OnPlansResult[],
+  blockOnVerdict: boolean,
+): OnPlansSummary {
+  const approved = results.filter((r) => r.status === 'approved').length;
+  const blocked = results.filter((r) => r.status === 'blocked').length;
+  const failed = results.filter(
+    (r) => r.status === 'failed' || r.status === 'timeout',
+  ).length;
+  let exitCode: 0 | 1 | 2 = 0;
+  if (failed > 0) exitCode = 1;
+  else if (blocked > 0 && blockOnVerdict) exitCode = 2;
+  return { total: results.length, approved, blocked, failed, exitCode };
+}
+
+councilCommand
+  .command('on-plans')
+  .argument('<phase-dir>', 'Directory containing *-PLAN.md files (e.g. .planning/phases/03-foo/)')
+  .description('Dispatch council adversarial review on every PLAN.md in a phase dir (parallel)')
+  .requiredOption('--org <org>', 'Org name')
+  .option('--instance <id>', 'cortextos instance id (default: default)')
+  .option('--agent <name>', 'Requesting agent name (default: cli)')
+  .option('--member <spec...>', 'Member spec id:provider[:reasoning]; repeatable. Default: codex-high + codex-low')
+  .option('--timeout-ms <ms>', '5-min default; per-request wall-clock budget', (v) => parseInt(v, 10))
+  .option('--block-on-verdict', 'Exit 2 if any plan is blocked (default: report-only — exits 0 even on blocks)')
+  .option('--json', 'Output raw JSON instead of human-readable summary')
+  .action(async (phaseDir: string, opts: {
+    org: string;
+    instance?: string;
+    agent?: string;
+    member?: string[];
+    timeoutMs?: number;
+    blockOnVerdict?: boolean;
+    json?: boolean;
+  }) => {
+    const planFiles = findPlanFiles(phaseDir);
+    if (planFiles.length === 0) {
+      process.stderr.write(`No *-PLAN.md files found in ${phaseDir}\n`);
+      process.exit(1);
+    }
+
+    let members: CouncilMember[];
+    try {
+      members = (opts.member ?? []).map(parseMemberSpec);
+    } catch (err) {
+      process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+      process.exit(1);
+    }
+    if (members.length === 0) members = defaultMembers();
+
+    const agent = opts.agent ?? process.env.CTX_AGENT_NAME ?? 'cli';
+    const instance = opts.instance ?? process.env.CTX_INSTANCE_ID ?? 'default';
+    const paths = resolvePaths(agent, instance, opts.org);
+
+    process.stderr.write(
+      `council on-plans: dispatching ${planFiles.length} plan(s) × ${members.length} member(s) in parallel\n`,
+    );
+
+    const results: OnPlansResult[] = await Promise.all(
+      planFiles.map(async (file): Promise<OnPlansResult> => {
+        const plan = readFileSync(file, 'utf-8');
+        try {
+          const { request } = await runCouncil({
+            paths,
+            org: opts.org,
+            requestingAgent: agent,
+            kind: 'adversarial',
+            plan,
+            members,
+            timeoutMs: opts.timeoutMs,
+          });
+          return {
+            file,
+            status: request.status,
+            must_fix: request.merged?.must_fix ?? [],
+            request_id: request.id,
+          };
+        } catch (err) {
+          process.stderr.write(`  [error] ${file}: ${err instanceof Error ? err.message : String(err)}\n`);
+          return { file, status: 'failed', must_fix: [], request_id: '' };
+        }
+      }),
+    );
+
+    const summary = summarizeOnPlans(results, opts.blockOnVerdict ?? false);
+
+    if (opts.json) {
+      process.stdout.write(JSON.stringify({ summary, results }, null, 2) + '\n');
+      process.exit(summary.exitCode);
+    }
+
+    process.stdout.write(
+      `\n${summary.total} plan(s): ${summary.approved} approved, ${summary.blocked} blocked, ${summary.failed} failed\n\n`,
+    );
+    for (const r of results) {
+      const tag = r.status.toUpperCase().padEnd(8);
+      process.stdout.write(`  [${tag}] ${r.file}  (${r.request_id || 'no-id'})\n`);
+      if (r.status === 'blocked' && r.must_fix.length > 0) {
+        for (const m of r.must_fix) {
+          process.stdout.write(`           - ${m}\n`);
+        }
+      }
+    }
+    if (summary.blocked > 0 && !(opts.blockOnVerdict ?? false)) {
+      process.stdout.write(
+        `\n(report-only: ${summary.blocked} block verdict(s) ignored. Pass --block-on-verdict to gate exit code.)\n`,
+      );
+    }
+    process.exit(summary.exitCode);
   });
