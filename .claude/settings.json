@@ -16,6 +16,10 @@
         "hooks": [
           {
             "type": "command",
+            "command": ".claude/hooks/goal-loop.sh"
+          },
+          {
+            "type": "command",
             "command": ".claude/hooks/quality-gates.sh"
           }
         ]
